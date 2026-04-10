@@ -435,10 +435,16 @@ def initialize_default_split_rules():
                     exact1 = rule1.exact_matches.add()
                     exact1.value = "Root"
 
-                    # 创建默认规则 2: Other (Deform Bones)
-                    rule2 = armature.amazing_split_rules.add()
-                    rule2.name = "Other (Deform Bones)"
-                    rule2.is_hidden = False
+                    # 自动创建 "Other" 规则（用于收集未匹配的骨骼集合）
+                    rule_other = armature.amazing_split_rules.add()
+                    rule_other.name = "Other"
+                    rule_other.is_hidden = False
+                    
+                    # 迁移逻辑：如果存在旧的 "Other (Deform Bones)" 规则，重命名为 "Other"
+                    for rule in armature.amazing_split_rules:
+                        if rule.name == "Other (Deform Bones)":
+                            rule.name = "Other"
+                            print(f"[DEBUG] 已将旧规则 'Other (Deform Bones)' 重命名为 'Other'")
                     
                     print(f"[DEBUG] 已为 {armature.name} 创建 {len(armature.amazing_split_rules)} 个默认规则")
                 else:
@@ -471,6 +477,9 @@ def register():
 
     bpy.types.Armature.amazing_grid_data = bpy.props.CollectionProperty(type=ui_layer_editor.AMAZING_RIGGING_CollectionItem)
     bpy.types.Armature.amazing_deform_grid_data = bpy.props.CollectionProperty(type=ui_layer_editor.AMAZING_RIGGING_CollectionItem)
+    
+    # Create collections for each split rule (will be dynamically managed)
+    # amazing_grid_data_0, amazing_grid_data_1, etc.
     bpy.types.Armature.amazing_props = bpy.props.PointerProperty(type=ui_layer_editor.AMAZING_RIGGING_ArmatureProperties)
     bpy.types.Armature.amazing_bone_pockets = bpy.props.CollectionProperty(type=ui_layer_editor.AMAZING_RIGGING_Bone_Pocket)
     bpy.types.Armature.amazing_split_rules = bpy.props.CollectionProperty(type=ui_layer_editor.AMAZING_RIGGING_SplitRule)

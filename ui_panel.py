@@ -1,9 +1,63 @@
 import bpy
 from bpy.types import Panel, Operator
-from bpy.props import StringProperty
+from bpy.props import StringProperty, IntProperty
 from datetime import datetime
 
 _last_pose_armature = None
+
+# Independent fold state for ui_panel (not shared with Split Bones Rules panel)
+_ui_panel_rule_hidden = {}  # {armature_data_name_rule_idx: is_hidden}
+
+# Independent fold state for pockets per rule (not shared across rules)
+_ui_panel_pocket_hidden = {}  # {armature_data_name_rule_idx_pocket_row: is_hidden}
+
+class AMAZING_RIGGING_OT_toggle_ui_panel_rule(Operator):
+    bl_idname = "armature.amazing_rigging_toggle_ui_panel_rule"
+    bl_label = "Toggle UI Panel Rule Visibility"
+    bl_description = "Toggle rule visibility in UI panel only"
+    bl_options = {'INTERNAL'}
+
+    rule_index: IntProperty()
+
+    def execute(self, context):
+        global _ui_panel_rule_hidden
+        arm_data = context.active_object.data
+
+        rule_key = f"{arm_data.name}_{self.rule_index}"
+        current_hidden = _ui_panel_rule_hidden.get(rule_key, False)
+        _ui_panel_rule_hidden[rule_key] = not current_hidden
+
+        for area in context.screen.areas:
+            area.tag_redraw()
+
+        status = "expanded" if current_hidden else "collapsed"
+        self.report({'INFO'}, f"Rule {self.rule_index} {status}")
+        return {'FINISHED'}
+
+class AMAZING_RIGGING_OT_toggle_ui_panel_pocket(Operator):
+    bl_idname = "armature.amazing_rigging_toggle_ui_panel_pocket"
+    bl_label = "Toggle UI Panel Pocket Visibility"
+    bl_description = "Toggle pocket visibility in UI panel only"
+    bl_options = {'INTERNAL'}
+
+    pocket_row: IntProperty()
+    rule_index: IntProperty()
+
+    def execute(self, context):
+        global _ui_panel_pocket_hidden
+        arm_data = context.active_object.data
+
+        # Use independent fold state per rule
+        pocket_key = f"{arm_data.name}_{self.rule_index}_{self.pocket_row}"
+        current_hidden = _ui_panel_pocket_hidden.get(pocket_key, False)
+        _ui_panel_pocket_hidden[pocket_key] = not current_hidden
+
+        for area in context.screen.areas:
+            area.tag_redraw()
+
+        status = "expanded" if current_hidden else "collapsed"
+        self.report({'INFO'}, f"Pocket {self.pocket_row} in rule {self.rule_index} {status}")
+        return {'FINISHED'}
 
 class AMAZING_RIGGING_OT_toggle_bone_collection(Operator):
     bl_idname = "armature.amazing_rigging_toggle_collection"
@@ -182,173 +236,169 @@ class AMAZING_RIGGING_PT_main_sidebar(Panel):
 
         layout.separator()
 
-        sorted_items = sorted(grid_data, key=lambda x: (x.row, x.col))
-
-        rows_dict = {}
-        for item in sorted_items:
-            if item.row not in rows_dict:
-                rows_dict[item.row] = []
-            rows_dict[item.row].append(item)
-
-        b_cols = getattr(arm_data, "collections", None)
-
-        sorted_pocket_rows = sorted(pocket_rows)
-
-        def get_pocket_for_row(row_idx):
-            for i, pocket_row in enumerate(sorted_pocket_rows):
-                if pocket_row == row_idx:
-                    for pocket in pockets:
-                        if pocket.row == pocket_row:
-                            return pocket
-                elif pocket_row < row_idx:
-                    next_pocket_row = sorted_pocket_rows[i + 1] if i + 1 < len(sorted_pocket_rows) else None
-                    if next_pocket_row is None or row_idx < next_pocket_row:
-                        for pocket in pockets:
-                            if pocket.row == pocket_row:
-                                return pocket
-            return None
-
-        def is_pocket_hidden(pocket):
-            if pocket is None:
-                return False
-            return pocket.is_hidden
-
-        all_rows = sorted(set(list(rows_dict.keys()) + list(pocket_rows)))
-
-        for row_idx in all_rows:
-            if row_idx in pocket_rows:
-                for pocket in pockets:
-                    if pocket.row == row_idx:
-                        pocket_row_ui = layout.row()
-                        icon_type = 'TRIA_RIGHT' if pocket.is_hidden else 'TRIA_DOWN'
-
-                        toggle_op = pocket_row_ui.operator("armature.amazing_rigging_toggle_bone_pocket", text=pocket.name, icon=icon_type, emboss=False)
-                        toggle_op.pocket_row = pocket.row
-                        pocket_row_ui.alignment = 'CENTER'
-                        break
-
-            pocket = get_pocket_for_row(row_idx)
-            pocket_hidden = is_pocket_hidden(pocket)
-
-            if pocket_hidden:
-                continue
-
-            if row_idx in rows_dict:
-                row_items = rows_dict[row_idx]
-                if len(row_items) > 0:
-                    row_flow = layout.row(align=True)
-
-                    for item in row_items:
-                        if item.is_hidden:
-                            continue
-
-                        if b_cols and item.name in b_cols:
-                            b_col = b_cols[item.name]
-                            row_flow.prop(b_col, "is_visible", text=item.note, toggle=True)
-                        else:
-                            row_flow.label(text=item.note)
-
-        # ========== Draw Split Bones Collections ==========
+        # Draw collections by split rules
         self.draw_split_bones_collections(layout, arm_data, target_armature)
 
     def draw_split_bones_collections(self, layout, arm_data, target_armature):
-        """Draw bone collections based on split rules"""
-        props = arm_data.amazing_props
-
-        # If no split rules, skip
-        if len(arm_data.amazing_split_rules) == 0:
-            return
-
+        """Draw bone collections from amazing_grid_data grouped by split rules"""
+        global _ui_panel_rule_hidden, _ui_panel_pocket_hidden
+        
+        grid_data = getattr(arm_data, "amazing_grid_data", [])
+        pockets = getattr(arm_data, "amazing_bone_pockets", [])
         b_cols = getattr(arm_data, "collections", None)
-        if not b_cols:
+
+        if not grid_data or len(grid_data) == 0:
             return
-
-        # Get all bones and classify them by split rules
-        bones = arm_data.bones
-        if not bones:
-            return
-
-        # Track which collections have been matched
-        matched_collection_names = set()
-
-        # First pass: match collections with rules that have prefixes/exact matches
-        rule_matches = {}  # rule_idx -> list of collection names
-
-        for rule_idx, rule in enumerate(arm_data.amazing_split_rules):
-            rule_matches[rule_idx] = []
-
-            # Skip rules with no prefixes and no exact matches (they're "catch-all" rules)
-            has_prefixes = len(rule.prefixes) > 0 and any(p.value for p in rule.prefixes)
-            has_exact = len(rule.exact_matches) > 0 and any(e.value for e in rule.exact_matches)
-
-            if not has_prefixes and not has_exact:
-                continue
-
-            for b_col in b_cols:
-                # Skip if already matched
-                if b_col.name in matched_collection_names:
-                    continue
-
-                # Check if any bone in this collection matches the rule
-                should_include = False
-
-                for bone in b_col.bones:
-                    bone_name = bone.name
-
-                    # Check prefixes
-                    for prefix_item in rule.prefixes:
-                        if prefix_item.value and bone_name.startswith(prefix_item.value):
-                            should_include = True
-                            break
-
-                    # Check exact matches
-                    if not should_include:
-                        for exact_item in rule.exact_matches:
-                            if exact_item.value and bone_name == exact_item.value:
-                                should_include = True
-                                break
-
-                    if should_include:
-                        break
-
-                if should_include:
-                    rule_matches[rule_idx].append(b_col.name)
-                    matched_collection_names.add(b_col.name)
-
-        # Second pass: assign unmatched collections to catch-all rules
-        for rule_idx, rule in enumerate(arm_data.amazing_split_rules):
-            has_prefixes = len(rule.prefixes) > 0 and any(p.value for p in rule.prefixes)
-            has_exact = len(rule.exact_matches) > 0 and any(e.value for e in rule.exact_matches)
-
-            if not has_prefixes and not has_exact:
-                # This is a catch-all rule, add unmatched collections
-                for b_col in b_cols:
-                    if b_col.name not in matched_collection_names:
-                        rule_matches[rule_idx].append(b_col.name)
-                        matched_collection_names.add(b_col.name)
 
         # Draw each rule's collections
         for rule_idx, rule in enumerate(arm_data.amazing_split_rules):
-            if rule.is_hidden:
+            rule_key = f"{arm_data.name}_{rule_idx}"
+            is_hidden = _ui_panel_rule_hidden.get(rule_key, False)
+
+            # Filter items for this rule
+            rule_items = [item for item in grid_data if item.rule_index == rule_idx]
+            
+            if not rule_items:
                 continue
 
-            matched_collections = rule_matches.get(rule_idx, [])
+            # Rule box - outer container
+            rule_box = layout.box()
+            
+            # Rule header with fold button
+            row_header = rule_box.row()
+            icon_type = 'TRIA_RIGHT' if is_hidden else 'TRIA_DOWN'
 
-            if matched_collections:
-                row_label = layout.row()
-                row_label.label(text=f"{rule.name}", icon='GROUP_BONE')
+            toggle_op = row_header.operator("armature.amazing_rigging_toggle_ui_panel_rule", text=f"{rule.name} ({len(rule_items)})", icon=icon_type, emboss=False)
+            toggle_op.rule_index = rule_idx
 
-                row_flow = layout.row(align=True)
-                for col_name in matched_collections:
-                    if b_cols and col_name in b_cols:
-                        b_col = b_cols[col_name]
-                        row_flow.prop(b_col, "is_visible", text=col_name, toggle=True)
+            # Rule content (when expanded)
+            if not is_hidden:
+                # Filter pockets for this rule (by row AND rule_index)
+                rule_rows = {item.row for item in rule_items}
+                rule_pockets = [p for p in pockets if p.row in rule_rows and p.rule_index == rule_idx]
+                pocket_rows = {p.row for p in rule_pockets}
+
+                # Sort items by row/col
+                sorted_items = sorted(rule_items, key=lambda x: (x.row, x.col))
+                rows_dict = {}
+                for item in sorted_items:
+                    if item.row not in rows_dict:
+                        rows_dict[item.row] = []
+                    rows_dict[item.row].append(item)
+
+                sorted_pocket_rows = sorted(pocket_rows)
+
+                # Helper function to find which pocket affects a row
+                def get_pocket_for_row(row_idx):
+                    for i, pocket_row in enumerate(sorted_pocket_rows):
+                        if pocket_row == row_idx:
+                            for pocket in rule_pockets:
+                                if pocket.row == pocket_row:
+                                    return pocket
+                        elif pocket_row < row_idx:
+                            next_pocket_row = sorted_pocket_rows[i + 1] if i + 1 < len(sorted_pocket_rows) else None
+                            if next_pocket_row is None or row_idx < next_pocket_row:
+                                for pocket in rule_pockets:
+                                    if pocket.row == pocket_row:
+                                        return pocket
+                    return None
+
+                def is_pocket_hidden(pocket):
+                    if pocket is None:
+                        return False
+                    pocket_key = f"{arm_data.name}_{rule_idx}_{pocket.row}"
+                    return _ui_panel_pocket_hidden.get(pocket_key, False)
+
+                # Group items by pocket or no-pocket
+                pocket_items_dict = {}
+                for pocket in rule_pockets:
+                    pocket_items_dict[pocket.row] = []
+                no_pocket_items = []
+                
+                for row_idx in sorted(rows_dict.keys()):
+                    pocket = get_pocket_for_row(row_idx)
+                    if pocket:
+                        if pocket.row not in pocket_items_dict:
+                            pocket_items_dict[pocket.row] = []
+                        pocket_items_dict[pocket.row].extend(rows_dict[row_idx])
                     else:
-                        row_flow.label(text=col_name)
+                        no_pocket_items.extend(rows_dict[row_idx])
 
-                layout.separator()
+                # Draw pockets first (each pocket wraps its items)
+                for pocket_row in sorted_pocket_rows:
+                    pocket = None
+                    for p in rule_pockets:
+                        if p.row == pocket_row:
+                            pocket = p
+                            break
+                    
+                    if not pocket:
+                        continue
+                    
+                    # Pocket box
+                    pocket_box = rule_box.box()
+                    pocket_header = pocket_box.row()
+                    
+                    # Use independent fold state per rule
+                    pocket_key = f"{arm_data.name}_{rule_idx}_{pocket_row}"
+                    is_pocket_hidden = _ui_panel_pocket_hidden.get(pocket_key, False)
+                    icon_type_pocket = 'TRIA_RIGHT' if is_pocket_hidden else 'TRIA_DOWN'
+                    
+                    toggle_pocket_op = pocket_header.operator("armature.amazing_rigging_toggle_ui_panel_pocket", text=pocket.name, icon=icon_type_pocket, emboss=False)
+                    toggle_pocket_op.pocket_row = pocket_row
+                    toggle_pocket_op.rule_index = rule_idx
+                    
+                    # Pocket content (when expanded)
+                    if not is_pocket_hidden:
+                        pocket_items = pocket_items_dict.get(pocket_row, [])
+                        if pocket_items:
+                            # Group by row
+                            pocket_rows_dict = {}
+                            for item in pocket_items:
+                                if item.row not in pocket_rows_dict:
+                                    pocket_rows_dict[item.row] = []
+                                pocket_rows_dict[item.row].append(item)
+                            
+                            # Draw items row by row
+                            for item_row in sorted(pocket_rows_dict.keys()):
+                                row_items = pocket_rows_dict[item_row]
+                                if row_items:
+                                    row_flow = pocket_box.row(align=True)
+                                    for item in row_items:
+                                        if item.is_hidden:
+                                            continue
+                                        
+                                        if b_cols and item.name in b_cols:
+                                            b_col = b_cols[item.name]
+                                            row_flow.prop(b_col, "is_visible", text=item.note, toggle=True)
+                                        else:
+                                            row_flow.label(text=item.note)
+
+                # Draw items without pocket
+                if no_pocket_items:
+                    no_pocket_rows_dict = {}
+                    for item in no_pocket_items:
+                        if item.row not in no_pocket_rows_dict:
+                            no_pocket_rows_dict[item.row] = []
+                        no_pocket_rows_dict[item.row].append(item)
+                    
+                    for item_row in sorted(no_pocket_rows_dict.keys()):
+                        row_items = no_pocket_rows_dict[item_row]
+                        if row_items:
+                            row_flow = rule_box.row(align=True)
+                            for item in row_items:
+                                if item.is_hidden:
+                                    continue
+                                
+                                if b_cols and item.name in b_cols:
+                                    b_col = b_cols[item.name]
+                                    row_flow.prop(b_col, "is_visible", text=item.note, toggle=True)
+                                else:
+                                    row_flow.label(text=item.note)
 
 classes = [
+    AMAZING_RIGGING_OT_toggle_ui_panel_rule,
+    AMAZING_RIGGING_OT_toggle_ui_panel_pocket,
     AMAZING_RIGGING_OT_toggle_bone_collection,
     AMAZING_RIGGING_OT_show_all,
     AMAZING_RIGGING_OT_hide_all,

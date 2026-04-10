@@ -2,6 +2,12 @@ import bpy
 from bpy.types import Panel, PropertyGroup, Operator
 from bpy.props import StringProperty, IntProperty, BoolProperty, CollectionProperty
 
+# Independent fold state for Split Bones Rules panel
+_split_rules_hidden = {}  # {armature_data_name_rule_idx: is_hidden}
+
+# Independent fold state for Ctrl Bones UI Settings panel (Layer Editor)
+_layer_editor_rules_hidden = {}  # {armature_data_name_rule_idx: is_hidden}
+
 class AMAZING_RIGGING_StringItem(PropertyGroup):
     value: StringProperty(name="Value", default="")
 
@@ -17,9 +23,11 @@ class AMAZING_RIGGING_CollectionItem(PropertyGroup):
     col: IntProperty(name="Col", default=0)
     note: StringProperty(name="Note", default="")
     is_hidden: BoolProperty(name="Hidden", default=False)
+    rule_index: IntProperty(name="Rule Index", default=0)  # Which split rule this item belongs to
 
 class AMAZING_RIGGING_Bone_Pocket(PropertyGroup):
     row: IntProperty(name="Row", default=0)
+    rule_index: IntProperty(name="Rule Index", default=0)
     name: StringProperty(name="Pocket Name", default="Bone Pocket")
     is_hidden: BoolProperty(name="Hidden", default=False)
 
@@ -52,69 +60,113 @@ class AMAZING_RIGGING_OT_init_data(Operator):
             self.report({'ERROR'}, "Cannot find armature object in scene!")
             return {'CANCELLED'}
 
-        arm_data.amazing_grid_data.clear()
-        arm_data.amazing_deform_grid_data.clear()
-
         bones = arm_data.bones
         if not bones:
             self.report({'ERROR'}, "No bones found in this armature!")
             return {'CANCELLED'}
 
-        for bone in bones:
-            should_deform = bone.name.startswith('DEF-') or bone.name == 'Root'
-            bone.use_deform = should_deform
+        # Clear existing grid data and pockets
+        arm_data.amazing_grid_data.clear()
+        arm_data.amazing_deform_grid_data.clear()
+        arm_data.amazing_bone_pockets.clear()
 
-        mixed_collections = []
+        # Initialize split rules if empty
+        if len(arm_data.amazing_split_rules) == 0:
+            rule1 = arm_data.amazing_split_rules.add()
+            rule1.name = "Ctrl Bones"
+            rule1.is_hidden = False
+            prefix1 = rule1.prefixes.add()
+            prefix1.value = "DEF-"
+            exact1 = rule1.exact_matches.add()
+            exact1.value = "Root"
 
-        for b_col in b_cols:
-            deform_bones = []
-            control_bones = []
+        # Ensure "Other" rule exists (auto catch-all, not shown in config panel)
+        other_rule = None
+        for rule in arm_data.amazing_split_rules:
+            if rule.name == "Other":
+                other_rule = rule
+                break
+        
+        if other_rule is None:
+            other_rule = arm_data.amazing_split_rules.add()
+            other_rule.name = "Other"
+            other_rule.is_hidden = False
+            # No prefixes or exact matches - it's a catch-all
 
-            for bone in b_col.bones:
-                if bone.use_deform:
-                    deform_bones.append(bone.name)
-                else:
-                    control_bones.append(bone.name)
+        # Classify bone collections using split rules
+        matched_collection_names = set()
+        rule_collections = {}  # rule_idx -> list of collection names
 
-            has_deform = len(deform_bones) > 0
-            has_control = len(control_bones) > 0
+        # First pass: match collections with rules that have prefixes/exact matches
+        for rule_idx, rule in enumerate(arm_data.amazing_split_rules):
+            rule_collections[rule_idx] = []
 
-            if has_deform:
-                item = arm_data.amazing_deform_grid_data.add()
-                item.name = b_col.name
-                item.row = len(arm_data.amazing_deform_grid_data) - 1
-                item.col = 0
-                item.note = b_col.name
+            has_prefixes = len(rule.prefixes) > 0 and any(p.value for p in rule.prefixes)
+            has_exact = len(rule.exact_matches) > 0 and any(e.value for e in rule.exact_matches)
 
-            if has_control:
+            if not has_prefixes and not has_exact:
+                continue
+
+            for b_col in b_cols:
+                if b_col.name in matched_collection_names:
+                    continue
+
+                should_include = False
+
+                for bone in b_col.bones:
+                    bone_name = bone.name
+
+                    for prefix_item in rule.prefixes:
+                        if prefix_item.value and bone_name.startswith(prefix_item.value):
+                            should_include = True
+                            break
+
+                    if not should_include:
+                        for exact_item in rule.exact_matches:
+                            if exact_item.value and bone_name == exact_item.value:
+                                should_include = True
+                                break
+
+                    if should_include:
+                        break
+
+                if should_include:
+                    rule_collections[rule_idx].append(b_col.name)
+                    matched_collection_names.add(b_col.name)
+
+        # Second pass: assign unmatched collections to catch-all rules
+        for rule_idx, rule in enumerate(arm_data.amazing_split_rules):
+            has_prefixes = len(rule.prefixes) > 0 and any(p.value for p in rule.prefixes)
+            has_exact = len(rule.exact_matches) > 0 and any(e.value for e in rule.exact_matches)
+
+            if not has_prefixes and not has_exact:
+                for b_col in b_cols:
+                    if b_col.name not in matched_collection_names:
+                        rule_collections[rule_idx].append(b_col.name)
+                        matched_collection_names.add(b_col.name)
+
+        # Add ALL matched collections to amazing_grid_data with rule_index
+        # Each rule gets its own section, each collection gets its own row by default
+        for rule_idx in sorted(rule_collections.keys()):
+            collections = rule_collections[rule_idx]
+            
+            if not collections:
+                continue
+
+            # Add each collection as a separate row within this rule's section
+            for col_idx, col_name in enumerate(collections):
                 item = arm_data.amazing_grid_data.add()
-                item.name = b_col.name
-                item.row = len(arm_data.amazing_grid_data) - 1
+                item.name = col_name
+                item.row = col_idx  # Each collection gets its own row by default
                 item.col = 0
-                item.note = b_col.name
-
-            if has_deform and has_control:
-                mixed_collections.append(b_col.name)
+                item.note = col_name
+                item.rule_index = rule_idx  # Mark which rule this item belongs to
 
         for area in context.screen.areas:
             area.tag_redraw()
 
-        if mixed_collections:
-            mixed_list = "\n".join(f"* {name}" for name in mixed_collections)
-            self.report({'WARNING'}, f"Mixed Collections contain both deform and control bones:")
-
-            def draw_message(self, context):
-                self.layout.label(text="Warning: Mixed Bone Collections", icon='WARNING')
-                self.layout.label(text="These collection contain both deform and control bones:")
-                box = self.layout.box()
-                for name in mixed_collections:
-                    box.label(text=f"* {name}")
-                self.layout.label(text="They have been added to both grid data.")
-
-            context.window_manager.popup_menu(draw_message, title="Mixed Bone Collections Detected", icon='WARNING')
-
-        total_items = len(arm_data.amazing_grid_data) + len(arm_data.amazing_deform_grid_data)
-        self.report({'INFO'}, 'f"Initialized {total_items} ({len(arm_data.amazing_grid_data)} control, {len(arm_data.amazing_deform_grid_data)} deform).')
+        total_items = len(arm_data.amazing_grid_data)
+        self.report({'INFO'}, f"Initialized {total_items} items across {len(arm_data.amazing_split_rules)} rules.")
         return {'FINISHED'}
 
 class AMAZING_RIGGING_OT_set_active_collection(Operator):
@@ -165,6 +217,7 @@ class AMAZING_RIGGING_OT_edit_note(Operator):
     item_name: StringProperty()
     target_row: IntProperty()
     target_col: IntProperty()
+    rule_index: IntProperty(default=0)
     original_note: StringProperty()
 
     def modal(self, context, event):
@@ -186,11 +239,12 @@ class AMAZING_RIGGING_OT_edit_note(Operator):
                 editing_key = arm_data.amazing_props.editing_item_key
                 if editing_key:
                     parts = editing_key.split("_")
-                    if len(parts) == 2:
-                        current_row = int(parts[0])
-                        current_col = int(parts[1])
+                    if len(parts) == 3:
+                        current_rule = int(parts[0])
+                        current_row = int(parts[1])
+                        current_col = int(parts[2])
                         for item in grid_data:
-                            if item.row == current_row and item.col == current_col:
+                            if item.rule_index == current_rule and item.row == current_row and item.col == current_col:
                                 item.note = self.original_note
                                 break
 
@@ -233,7 +287,7 @@ class AMAZING_RIGGING_OT_edit_note(Operator):
 
             for item in grid_data:
                 if item.name == self.item_name and item.row == self.target_row and item.col == self.target_col:
-                    arm_data.amazing_props.editing_item_key = f"{item.row}_{item.col}"
+                    arm_data.amazing_props.editing_item_key = f"{self.rule_index}_{item.row}_{item.col}"
                     original_note_value = item.note
                     print(f"  - Found item, set editing_key: '{arm_data.amazing_props.editing_item_key}'")
                     print(f"  - original_note: '{original_note_value}'")
@@ -288,14 +342,15 @@ class AMAZING_RIGGING_OT_move_col_left(Operator):
             return {'CANCELLED'}
 
         parts = editing_key.split("_")
-        if len(parts) != 2:
+        if len(parts) != 3:
             self.report({'WARNING'}, "Invalid Collection Key!")
             return {'CANCELLED'}
 
-        current_row = int(parts[0])
-        current_col = int(parts[1])
+        current_rule = int(parts[0])
+        current_row = int(parts[1])
+        current_col = int(parts[2])
 
-        row_items = [item for item in grid_data if item.row == current_row]
+        row_items = [item for item in grid_data if item.rule_index == current_rule and item.row == current_row]
         row_items_sorted = sorted(row_items, key=lambda x: x.col)
 
         current_item = None
@@ -319,7 +374,7 @@ class AMAZING_RIGGING_OT_move_col_left(Operator):
         current_item.col = swap_item.col
         swap_item.col = current_col_val
 
-        arm_data.amazing_props.editing_item_key = f"{current_item.row}_{current_item.col}"
+        arm_data.amazing_props.editing_item_key = f"{current_rule}_{current_item.row}_{current_item.col}"
         self.report({'INFO'}, f"Moved '{current_item.note}' left!")
         return {'FINISHED'}
 
@@ -339,14 +394,15 @@ class AMAZING_RIGGING_OT_move_col_right(Operator):
             return {'CANCELLED'}
 
         parts = editing_key.split("_")
-        if len(parts) != 2:
+        if len(parts) != 3:
             self.report({'WARNING'}, "Invalid Collection Key!")
             return {'CANCELLED'}
 
-        current_row = int(parts[0])
-        current_col = int(parts[1])
+        current_rule = int(parts[0])
+        current_row = int(parts[1])
+        current_col = int(parts[2])
 
-        row_items = [item for item in grid_data if item.row == current_row]
+        row_items = [item for item in grid_data if item.rule_index == current_rule and item.row == current_row]
         row_items_sorted = sorted(row_items, key=lambda x: x.col)
 
         current_item = None
@@ -370,7 +426,7 @@ class AMAZING_RIGGING_OT_move_col_right(Operator):
         current_item.col = swap_item.col
         swap_item.col = current_col_val
 
-        arm_data.amazing_props.editing_item_key = f"{current_item.row}_{current_item.col}"
+        arm_data.amazing_props.editing_item_key = f"{current_rule}_{current_item.row}_{current_item.col}"
         self.report({'INFO'}, f"Moved '{current_item.note}' right!")
         return {'FINISHED'}
 
@@ -381,18 +437,21 @@ class AMAZING_RIGGING_OT_move_row_up(Operator):
     bl_options = {'REGISTER', 'UNDO'}
 
     target_row: IntProperty()
+    rule_index: IntProperty(default=0)
 
     def execute(self, context):
         arm_data = context.armature if hasattr(context, "armature") else context.active_object.data
         grid_data = getattr(arm_data, "amazing_grid_data", [])
 
-        rows_dict = {}
+        # Only consider items from this rule
+        rule_rows_dict = {}
         for item in grid_data:
-            if item.row not in rows_dict:
-                rows_dict[item.row] = []
-            rows_dict[item.row].append(item)
+            if item.rule_index == self.rule_index:
+                if item.row not in rule_rows_dict:
+                    rule_rows_dict[item.row] = []
+                rule_rows_dict[item.row].append(item)
 
-        sorted_rows = sorted(rows_dict.keys())
+        sorted_rows = sorted(rule_rows_dict.keys())
 
         current_row_index = -1
         for i, row_idx in enumerate(sorted_rows):
@@ -410,23 +469,21 @@ class AMAZING_RIGGING_OT_move_row_up(Operator):
 
         prev_row = sorted_rows[current_row_index - 1]
 
+        # Only swap rows for this rule
         for item in grid_data:
-            if item.row == self.target_row:
-                item.row = prev_row
-            elif item.row == prev_row:
-                item.row = self.target_row
+            if item.rule_index == self.rule_index:
+                if item.row == self.target_row:
+                    item.row = prev_row
+                elif item.row == prev_row:
+                    item.row = self.target_row
 
-        for pocket in arm_data.amazing_bone_pockets:
-            if pocket.row == self.target_row:
-                pocket.row = prev_row
-            elif pocket.row == prev_row:
-                pocket.row = self.target_row
+        # Pockets are NOT affected by row move (pockets are global)
 
         editing_key = arm_data.amazing_props.editing_item_key
         if editing_key:
             parts = editing_key.split("_")
-            if len(parts) == 2 and int(parts[0]) == self.target_row:
-                arm_data.amazing_props.editing_item_key = f"{prev_row}_{parts[1]}"
+            if len(parts) == 3 and int(parts[0]) == self.rule_index and int(parts[1]) == self.target_row:
+                arm_data.amazing_props.editing_item_key = f"{parts[0]}_{prev_row}_{parts[2]}"
 
         for area in context.screen.areas:
             area.tag_redraw()
@@ -441,18 +498,21 @@ class AMAZING_RIGGING_OT_move_row_down(Operator):
     bl_options = {'REGISTER', 'UNDO'}
 
     target_row: IntProperty()
+    rule_index: IntProperty(default=0)
 
     def execute(self, context):
         arm_data = context.armature if hasattr(context, "armature") else context.active_object.data
         grid_data = getattr(arm_data, "amazing_grid_data", [])
 
-        rows_dict = {}
+        # Only consider items from this rule
+        rule_rows_dict = {}
         for item in grid_data:
-            if item.row not in rows_dict:
-                rows_dict[item.row] = []
-            rows_dict[item.row].append(item)
+            if item.rule_index == self.rule_index:
+                if item.row not in rule_rows_dict:
+                    rule_rows_dict[item.row] = []
+                rule_rows_dict[item.row].append(item)
 
-        sorted_rows = sorted(rows_dict.keys())
+        sorted_rows = sorted(rule_rows_dict.keys())
 
         current_row_index = -1
         for i, row_idx in enumerate(sorted_rows):
@@ -470,23 +530,21 @@ class AMAZING_RIGGING_OT_move_row_down(Operator):
 
         next_row = sorted_rows[current_row_index + 1]
 
+        # Only swap rows for this rule
         for item in grid_data:
-            if item.row == self.target_row:
-                item.row = next_row
-            elif item.row == next_row:
-                item.row = self.target_row
+            if item.rule_index == self.rule_index:
+                if item.row == self.target_row:
+                    item.row = next_row
+                elif item.row == next_row:
+                    item.row = self.target_row
 
-        for pocket in arm_data.amazing_bone_pockets:
-            if pocket.row == self.target_row:
-                pocket.row = next_row
-            elif pocket.row == next_row:
-                pocket.row = self.target_row
+        # Pockets are NOT affected by row move (pockets are global)
 
         editing_key = arm_data.amazing_props.editing_item_key
         if editing_key:
             parts = editing_key.split("_")
-            if len(parts) == 2 and int(parts[0]) == self.target_row:
-                arm_data.amazing_props.editing_item_key = f"{next_row}_{parts[1]}"
+            if len(parts) == 3 and int(parts[0]) == self.rule_index and int(parts[1]) == self.target_row:
+                arm_data.amazing_props.editing_item_key = f"{parts[0]}_{next_row}_{parts[2]}"
 
         for area in context.screen.areas:
             area.tag_redraw()
@@ -501,43 +559,47 @@ class AMAZING_RIGGING_OT_insert_row(Operator):
     bl_options = {'REGISTER', 'UNDO'}
 
     target_row: IntProperty()
+    rule_index: IntProperty(default=0)
 
     def execute(self, context):
         arm_data = context.armature if hasattr(context, "armature") else context.active_object.data
         grid_data = getattr(arm_data, "amazing_grid_data", [])
 
-        print(f"\n[DEBUG] Insert Row at: {self.target_row}")
+        print(f"\n[DEBUG] Insert Row BELOW row: {self.target_row}, rule_index: {self.rule_index}")
         print(f"  - Current grid_data count: {len(grid_data)}")
         print(f"  - Current editing_key: '{arm_data.amazing_props.editing_item_key}")
 
+        # Move all rows > target_row down by 1 (insert below target_row)
         for item in grid_data:
-            if item.row > self.target_row:
+            if item.rule_index == self.rule_index and item.row > self.target_row:
                 item.row += 1
 
-        # Create empty item(placeholder item)
+        # Create empty item(placeholder item) for this rule BELOW target_row
         placeholder = grid_data.add()
         placeholder.name = ""
-        placeholder.row = self.target_row + 1
+        placeholder.row = self.target_row + 1  # Insert BELOW the target row
         placeholder.col = 0
         placeholder.note = ""
-        print(f"  - Created placeholder item at row ({self.target_row}")
+        placeholder.rule_index = self.rule_index
+        print(f"  - Created placeholder item at row {self.target_row + 1} (below row {self.target_row}) for rule {self.rule_index}")
 
         editing_key = arm_data.amazing_props.editing_item_key
         if editing_key:
             parts = editing_key.split("_")
-            if len(parts) == 2 and parts[1] != "empty":
-                row = int(parts[0])
-                col = int(parts[1])
-                if row > self.target_row:
+            if len(parts) == 3 and parts[2] != "empty":
+                rule_idx = int(parts[0])
+                row = int(parts[1])
+                col = int(parts[2])
+                if rule_idx == self.rule_index and row > self.target_row:
                     new_row = row + 1
-                    arm_data.amazing_props.editing_item_key = f"{new_row}_{col}"
+                    arm_data.amazing_props.editing_item_key = f"{rule_idx}_{new_row}_{col}"
                     print(f"  - Update editing_key: {editing_key} -> {arm_data.amazing_props.editing_item_key}")
 
         for area in context.screen.areas:
             area.tag_redraw()
 
         print(f"  - Inserted Done")
-        self.report({'INFO'}, f"Inserted empty row at Row: {self.target_row}")
+        self.report({'INFO'}, f"Inserted empty row below Row: {self.target_row}")
         return {'FINISHED'}
 
 class AMAZING_RIGGING_OT_delete_row(Operator):
@@ -547,17 +609,19 @@ class AMAZING_RIGGING_OT_delete_row(Operator):
     bl_options = {'REGISTER', 'UNDO'}
 
     target_row: IntProperty()
+    rule_index: IntProperty(default=0)
 
     def execute(self, context):
         arm_data = context.armature if hasattr(context, "armature") else context.active_object.data
         grid_data = getattr(arm_data, "amazing_grid_data", [])
 
-        print(f"\n[DEBUG] Delete Row: {self.target_row}")
+        print(f"\n[DEBUG] Delete Row: {self.target_row}, rule_index: {self.rule_index}")
         print(f"  - Current grid_data count: {len(grid_data)}")
 
+        # Only remove items from this rule at this row
         items_to_remove = []
         for i, item in enumerate(grid_data):
-            if item.row == self.target_row:
+            if item.rule_index == self.rule_index and item.row == self.target_row:
                 items_to_remove.append(i)
                 print(f"  - Tag delete item[{i}: {item.name}")
 
@@ -568,37 +632,27 @@ class AMAZING_RIGGING_OT_delete_row(Operator):
         editing_key = arm_data.amazing_props.editing_item_key
         if editing_key:
             parts = editing_key.split("_")
-            if len(parts) == 2:
-                row = int(parts[0])
-                col = int(parts[1])
-                if row == self.target_row:
+            if len(parts) == 3:
+                rule_idx = int(parts[0])
+                row = int(parts[1])
+                col = int(parts[2])
+                if rule_idx == self.rule_index and row == self.target_row:
                     print(f"  - editing_key at the deleted row, clear: '{editing_key}'")
                     arm_data.amazing_props.editing_item_key = ""
-                elif row > self.target_row:
+                elif rule_idx == self.rule_index and row > self.target_row:
                     new_row = row - 1
-                    arm_data.amazing_props.editing_item_key = f"{new_row}_{parts[1]}"
+                    arm_data.amazing_props.editing_item_key = f"{rule_idx}_{new_row}_{col}"
                     print(f"  - Update editing_key: {editing_key} -> {arm_data.amazing_props.editing_item_key}")
 
         for index in reversed(items_to_remove):
             grid_data.remove(index)
 
-        for pocket in arm_data.amazing_bone_pockets:
-            if pocket.row == self.target_row:
-                pocket.row = -1
-
+        # Update rows for this rule only
         for item in grid_data:
-            if item.row > self.target_row:
+            if item.rule_index == self.rule_index and item.row > self.target_row:
                 item.row -= 1
 
-        pocket_to_remove = []
-        for i, pocket in enumerate(arm_data.amazing_bone_pockets):
-            if pocket.row == -1:
-                pocket_to_remove.append(i)
-            elif pocket.row > self.target_row:
-                pocket.row -= 1
-
-        for index in reversed(pocket_to_remove):
-            arm_data.amazing_bone_pockets.remove(index)
+        # Pockets are NOT affected by row delete (pockets are global)
 
         for area in context.screen.areas:
             area.tag_redraw()
@@ -613,6 +667,7 @@ class AMAZING_RIGGING_OT_insert_collection(Operator):
     bl_options = {'REGISTER', 'UNDO'}
 
     target_row: IntProperty()
+    rule_index: IntProperty(default=0)
 
     def modal(self, context, event):
         if event.type == 'ESC':
@@ -622,11 +677,12 @@ class AMAZING_RIGGING_OT_insert_collection(Operator):
             editing_key = arm_data.amazing_props.editing_item_key
             if editing_key:
                 parts = editing_key.split("_")
-                if len(parts) == 2:
-                    row = int(parts[0])
-                    col = int(parts[1])
+                if len(parts) == 3:
+                    rule_idx = int(parts[0])
+                    row = int(parts[1])
+                    col = int(parts[2])
                     for item in grid_data:
-                        if item.row == row and item.col == col:
+                        if item.rule_index == rule_idx and item.row == row and item.col == col:
                             arm_data.amazing_props.editing_item_key = ""
                             break
 
@@ -643,11 +699,12 @@ class AMAZING_RIGGING_OT_insert_collection(Operator):
             editing_key = arm_data.amazing_props.editing_item_key
             if editing_key:
                 parts = editing_key.split("_")
-                if len(parts) == 2:
-                    row = int(parts[0])
-                    col = int(parts[1])
+                if len(parts) == 3:
+                    rule_idx = int(parts[0])
+                    row = int(parts[1])
+                    col = int(parts[2])
                     for item in grid_data:
-                        if item.row == row and item.col == col:
+                        if item.rule_index == rule_idx and item.row == row and item.col == col:
                             if not item.note.strip():
                                 item.note = item.name
                             arm_data.amazing_props.editing_item_key = ""
@@ -679,44 +736,47 @@ class AMAZING_RIGGING_OT_insert_collection(Operator):
         old_item_index = -1
         old_item_row = -1
         old_item_note = ""
+        old_item_rule_index = self.rule_index  # Default to current rule
         placeholder_index = -1
 
         print(f"\n'='*60")
         print(f"[INSERT COLLECTION] Starting operation")
-        print(f"  - target_row: {self.target_row}")
+        print(f"  - target_row: {self.target_row}, rule_index: {self.rule_index}")
         print(f"  - active_collection: {active_collection_name}")
         print(f"  - current editing_key: '{editing_key}")
 
         if editing_key:
             parts = editing_key.split("_")
-            if len(parts) == 2:
-                old_row = int(parts[0])
-                old_col = int(parts[1])
+            if len(parts) == 3:
+                old_rule = int(parts[0])
+                old_row = int(parts[1])
+                old_col = int(parts[2])
                 old_item_row = old_row
+                old_item_rule_index = old_rule
 
                 for i, item in enumerate(grid_data):
-                    if item.row == old_row and item.col == old_col:
+                    if item.rule_index == old_rule and item.row == old_row and item.col == old_col:
                         old_item_index = i
                         old_item_note = item.note
                         break
 
-        # Check target row have any placeholder
+        # Check target row have any placeholder (for this rule only)
         for i, item in enumerate(grid_data):
-            if item.row == self.target_row and item.name == "":
+            if item.rule_index == self.rule_index and item.row == self.target_row and item.name == "":
                 placeholder_index = i
                 print(f"  - Found placeholder at index {i}, will replace it")
                 break
 
         max_col = -1
         for item in grid_data:
-            if item.row == self.target_row and item.name != "":
+            if item.rule_index == self.rule_index and item.row == self.target_row and item.name != "":
                 max_col = max(max_col, item.col)
 
         new_col = max_col + 1
 
         already_exists = False
         for item in grid_data:
-            if item.name == active_collection_name and item.row == self.target_row:
+            if item.rule_index == self.rule_index and item.name == active_collection_name and item.row == self.target_row:
                 already_exists = True
                 break
 
@@ -727,7 +787,7 @@ class AMAZING_RIGGING_OT_insert_collection(Operator):
         # Print grid state before modification
         print(f"\n[BEFORE MODIFICATION] Grid State:")
         for i, item in enumerate(grid_data):
-            print(f"  [{i}] row={item.row}, col={item.col}, name='{item.name}'")
+            print(f"  [{i}] rule={item.rule_index}, row={item.row}, col={item.col}, name='{item.name}'")
 
         # have placeholder then replace it
         if placeholder_index >= 0:
@@ -737,14 +797,17 @@ class AMAZING_RIGGING_OT_insert_collection(Operator):
 
             placeholder_item = grid_data[placeholder_index]
             placeholder_original_row = placeholder_item.row
-            print(f"  - placeholder_item BEFORE replace: row={placeholder_item.row}, col={placeholder_item.col}, name='{placeholder_item.name}")
+            placeholder_original_rule = placeholder_item.rule_index
+            print(f"  - placeholder_item BEFORE replace: rule={placeholder_item.rule_index}, row={placeholder_item.row}, col={placeholder_item.col}, name='{placeholder_item.name}")
             print(f"  - placeholder_item id={id(placeholder_item)}")
 
             placeholder_item.name = active_collection_name
             placeholder_item.col = new_col
             placeholder_item.note = old_item_note if old_item_note else active_collection_name
+            # Ensure rule_index is correct
+            placeholder_item.rule_index = self.rule_index
 
-            print(f"  - placeholder_item AFTER replace: row={placeholder_item.row}, col={placeholder_item.col}, name='{placeholder_item.name}")
+            print(f"  - placeholder_item AFTER replace: rule={placeholder_item.rule_index}, row={placeholder_item.row}, col={placeholder_item.col}, name='{placeholder_item.name}")
 
             if old_item_index >= 0:
                 grid_data.remove(old_item_index)
@@ -752,29 +815,32 @@ class AMAZING_RIGGING_OT_insert_collection(Operator):
                 print(f"  - Grid AFTER removing old item:")
                 for i, item in enumerate(grid_data):
                     maker = " <-- placeholder" if id(item) == id(placeholder_item) else ""
-                    print(f"  [{i}] row={item.row}, col={item.col}, name='{item.name}'{maker}")
+                    print(f"  [{i}] rule={item.rule_index}, row={item.row}, col={item.col}, name='{item.name}'{maker}")
 
-                # Check old_row have any item
-                old_row_remaining_items = [item for item in grid_data if item.row == old_item_row]
+                # Check old_row have any item (for the OLD rule)
+                old_row_remaining_items = [item for item in grid_data if item.rule_index == old_item_rule_index and item.row == old_item_row]
                 need_delete_row = (len(old_row_remaining_items) == 0)
 
-                if need_delete_row and old_item_row < placeholder_original_row:
+                if need_delete_row and old_item_row < placeholder_original_row and old_item_rule_index == placeholder_original_rule:
                     placeholder_new_row = placeholder_original_row - 1
                 else:
                     placeholder_new_row = placeholder_original_row
 
-                # self.reindex_rows(arm_data, grid_data)
-                self.reindex_dict(arm_data, grid_data)
+                # Reindex ONLY for the affected rule
+                self.reindex_rule_rows(arm_data, grid_data, self.rule_index)
+                if old_item_rule_index != self.rule_index:
+                    self.reindex_rule_rows(arm_data, grid_data, old_item_rule_index)
+                
                 print(f"  - Grid AFTER reindex_dict")
                 for i, item in enumerate(grid_data):
                     maker = " <-- placeholder" if id(item) == id(placeholder_item) else ""
-                    print(f"  [{i}] row={item.row}, col={item.col}, name='{item.name}'{maker}")
+                    print(f"  [{i}] rule={item.rule_index}, row={item.row}, col={item.col}, name='{item.name}'{maker}")
 
                 found_placeholder = False
                 for item in grid_data:
-                    if item.name == active_collection_name and item.row == placeholder_new_row and item.col == new_col:
-                        arm_data.amazing_props.editing_item_key = f"{item.row}_{item.col}"
-                        print(f"  - placeholder_item AFTER reindex: row={item.row}, col={item.col}, name='{item.name}")
+                    if item.rule_index == self.rule_index and item.name == active_collection_name and item.row == placeholder_new_row and item.col == new_col:
+                        arm_data.amazing_props.editing_item_key = f"{item.rule_index}_{item.row}_{item.col}"
+                        print(f"  - placeholder_item AFTER reindex: rule_idx={item.rule_index}, row={item.row}, col={item.col}, name='{item.name}")
                         found_placeholder = True
                         break
 
@@ -782,7 +848,7 @@ class AMAZING_RIGGING_OT_insert_collection(Operator):
                     print(f"  - ERROR: Cannot find placeholder after reindex")
             else:
                 print(f"  - No old row to remove")
-                arm_data.amazing_props.editing_item_key = f"{placeholder_item.row}_{placeholder_item.col}"
+                arm_data.amazing_props.editing_item_key = f"{placeholder_item.rule_index}_{placeholder_item.row}_{placeholder_item.col}"
                 print(f"  - SET editing_key: '{arm_data.amazing_props.editing_item_key}'")
         else:
             print(f"\n[PATH B] No placeholder, creating new item")
@@ -790,22 +856,23 @@ class AMAZING_RIGGING_OT_insert_collection(Operator):
             actual_target_row = self.target_row
             if old_item_index >= 0:
                 grid_data.remove(old_item_index)
-                old_row_remaining_items = [item for item in grid_data if item.row == old_item_row]
+                old_row_remaining_items = [item for item in grid_data if item.rule_index == old_item_rule_index and item.row == old_item_row]
                 need_delete_row = (len(old_row_remaining_items) == 0)
 
-                if need_delete_row and old_item_row < self.target_row:
+                if need_delete_row and old_item_row < self.target_row and old_item_rule_index == self.rule_index:
                     actual_target_row = self.target_row - 1
 
-                self.reindex_dict(arm_data, grid_data)
+                # Reindex ONLY for the affected rule
+                self.reindex_rule_rows(arm_data, grid_data, old_item_rule_index)
 
                 print(f"  - Grid AFTER reindex_dict:")
                 for i, item in enumerate(grid_data):
-                    print(f"    [{i}] row={item.row}, col={item.col}, name='{item.name}'")
+                    print(f"    [{i}] rule={item.rule_index}, row={item.row}, col={item.col}, name='{item.name}'")
 
-            # 计算新行的 max_col（排除 placeholder）
+            # 计算新行的 max_col（只针对当前 rule）
             max_col = -1
             for item in grid_data:
-                if item.row == actual_target_row:
+                if item.rule_index == self.rule_index and item.row == actual_target_row:
                     max_col = max(max_col, item.col)
             new_col = max_col + 1
 
@@ -813,9 +880,10 @@ class AMAZING_RIGGING_OT_insert_collection(Operator):
             item.name = active_collection_name
             item.row = actual_target_row
             item.col = new_col
+            item.rule_index = self.rule_index  # Set the rule_index
             item.note = old_item_note if old_item_note else active_collection_name
-            arm_data.amazing_props.editing_item_key = f"{item.row}_{item.col}"
-            print(f"  - Created new item: row={item.row}, col={item.col}, name='{item.name}'")
+            arm_data.amazing_props.editing_item_key = f"{item.rule_index}_{item.row}_{item.col}"
+            print(f"  - Created new item: rule_idx={item.rule_index}, row={item.row}, col={item.col}, name='{item.name}'")
             print(f"  - SET editing_key: '{arm_data.amazing_props.editing_item_key}'")
 
         wm = context.window_manager
@@ -828,31 +896,29 @@ class AMAZING_RIGGING_OT_insert_collection(Operator):
         self.report({'INFO'}, f"Inserted '{active_collection_name}' at Row {self.target_row}, Col {new_col}!")
         return {'RUNNING_MODAL'}
 
-    def reindex_dict(self, arm_data, grid_data):
-        # Rebuild all row and col , update editingkey
+    def reindex_rule_rows(self, arm_data, grid_data, rule_idx):
+        """Reindex rows for a SPECIFIC rule only, not all rules"""
+        # Get all items for this rule
+        rule_items = [item for item in grid_data if item.rule_index == rule_idx]
+        
+        if not rule_items:
+            return
+        
+        # Group by row
         rows_dict = {}
-        for item in grid_data:
+        for item in rule_items:
             if item.row not in rows_dict:
                 rows_dict[item.row] = []
             rows_dict[item.row].append(item)
-
+        
+        # Sort rows and renumber them sequentially
         sorted_rows = sorted(rows_dict.keys())
-
-        # Remerber old row to new row mapping
-        old_to_new_row = {}
         for new_row_idx, old_row_idx in enumerate(sorted_rows):
-            old_to_new_row[old_row_idx] = new_row_idx
-
-            # Sort all of item cols in this row
+            # Sort items in this row by col
             row_items = sorted(rows_dict[old_row_idx], key=lambda x: x.col)
             for new_col_idx, item in enumerate(row_items):
                 item.row = new_row_idx
                 item.col = new_col_idx
-
-        # Update Bone Collection
-        for pocket in arm_data.amazing_bone_pockets:
-            if pocket.row in old_to_new_row:
-                pocket.row = old_to_new_row[pocket.row]
 
 class AMAZING_RIGGING_OT_add_bone_pocket(Operator):
     bl_idname = "armature.amazing_rigging_add_bone_pocket"
@@ -861,17 +927,19 @@ class AMAZING_RIGGING_OT_add_bone_pocket(Operator):
     bl_options = {'REGISTER', 'UNDO'}
 
     target_row: IntProperty()
+    rule_index: IntProperty(default=0)
 
     def execute(self, context):
         arm_data = context.armature if hasattr(context, "armature") else context.active_object.data
 
         for pocket in arm_data.amazing_bone_pockets:
-            if pocket.row == self.target_row:
+            if pocket.row == self.target_row and pocket.rule_index == self.rule_index:
                 self.report({'WARNING'}, "Bone Pocket already exists in this row!")
                 return {'CANCELLED'}
 
         pocket = arm_data.amazing_bone_pockets.add()
         pocket.row = self.target_row
+        pocket.rule_index = self.rule_index
         pocket.name = "Bone Pocket"
 
         for area in context.screen.areas:
@@ -887,13 +955,14 @@ class AMAZING_RIGGING_OT_remove_bone_pocket(Operator):
     bl_options = {'REGISTER', 'UNDO'}
 
     target_row: IntProperty()
+    rule_index: IntProperty(default=0)
 
     def execute(self, context):
         arm_data = context.armature if hasattr(context, "armature") else context.active_object.data
 
         items_to_remove = []
         for i, pocket in enumerate(arm_data.amazing_bone_pockets):
-            if pocket.row == self.target_row:
+            if pocket.row == self.target_row and pocket.rule_index == self.rule_index:
                 items_to_remove.append(i)
                 break
 
@@ -917,6 +986,7 @@ class AMAZING_RIGGING_OT_edit_bone_pocket(Operator):
     bl_options = {'REGISTER', 'UNDO'}
 
     target_row: IntProperty()
+    rule_index: IntProperty(default=0)
     original_name: StringProperty()
 
     def modal(self, context, event):
@@ -925,10 +995,11 @@ class AMAZING_RIGGING_OT_edit_bone_pocket(Operator):
         if event.type == 'ESC':
             print(f"\n[DEBUG] Edit Bone Pocket - ESC pressed:")
             print(f"  - target_row: {self.target_row}")
+            print(f"  - rule_index: {self.rule_index}")
             print(f"  - Current editing_pocket_key: '{arm_data.amazing_props.editing_pocket_key}'")
 
             for pocket in arm_data.amazing_bone_pockets:
-                if pocket.row == self.target_row:
+                if pocket.row == self.target_row and pocket.rule_index == self.rule_index:
                     pocket.name = self.original_name
                     break
 
@@ -945,6 +1016,7 @@ class AMAZING_RIGGING_OT_edit_bone_pocket(Operator):
         if event.type == 'RET' or event.type == 'NUMPAD_ENTER':
             print(f"\n[DEBUG] Edit Bone Pocket - Enter pressed:")
             print(f"  - target_row: {self.target_row}")
+            print(f"  - rule_index: {self.rule_index}")
             print(f"  - Current editing_pocket_key: '{arm_data.amazing_props.editing_pocket_key}'")
 
             arm_data.amazing_props.editing_pocket_key = ""
@@ -964,17 +1036,19 @@ class AMAZING_RIGGING_OT_edit_bone_pocket(Operator):
 
         print(f"\n[DEBUG] Edit Bone Pocket - Invoke:")
         print(f"  - target_row: {self.target_row}")
+        print(f"  - rule_index: {self.rule_index}")
 
         if arm_data.amazing_props.editing_item_key:
             print(f"  - Item editing active, canceling and restoring note")
             editing_key = arm_data.amazing_props.editing_item_key
             parts = editing_key.split("_")
-            if len(parts) == 2:
-                row = int(parts[0])
-                col = int(parts[1])
+            if len(parts) == 3:
+                rule_idx = int(parts[0])
+                row = int(parts[1])
+                col = int(parts[2])
                 grid_data = getattr(arm_data, "amazing_grid_data", [])
                 for item in grid_data:
-                    if item.row == row and item.col == col:
+                    if item.rule_index == rule_idx and item.row == row and item.col == col:
                         if item.note != item.name:
                             item.note = item.name
                             print(f"  - Restored item note to: '{item.name}")
@@ -982,8 +1056,8 @@ class AMAZING_RIGGING_OT_edit_bone_pocket(Operator):
             arm_data.amazing_props.editing_item_key = ""
 
         for pocket in arm_data.amazing_bone_pockets:
-            if pocket.row == self.target_row:
-                arm_data.amazing_props.editing_pocket_key = f"{pocket.row}"
+            if pocket.row == self.target_row and pocket.rule_index == self.rule_index:
+                arm_data.amazing_props.editing_pocket_key = f"{self.rule_index}_{pocket.row}"
                 self.original_name = pocket.name
                 print(f"  - Found pocket, set editing_pocket_key: '{arm_data.amazing_props.editing_pocket_key}'")
                 print(f"  - original_name: '{self.original_name}'")
@@ -1127,9 +1201,10 @@ class AMAZING_RIGGING_OT_init_split_rules(Operator):
         exact1 = rule1.exact_matches.add()
         exact1.value = "Root"
 
-        rule2 = arm_data.amazing_split_rules.add()
-        rule2.name = "Other (Deform Bones)"
-        rule2.is_hidden = False
+        # Auto-create "Other" rule (catch-all for unmatched collections)
+        rule_other = arm_data.amazing_split_rules.add()
+        rule_other.name = "Other"
+        rule_other.is_hidden = False
 
         print(f"[DEBUG] Initialized {len(arm_data.amazing_split_rules)} split rules")
 
@@ -1171,15 +1246,22 @@ class AMAZING_RIGGING_OT_remove_split_rule(Operator):
         arm_data = context.armature if hasattr(context, "armature") else context.active_object.data
         props = arm_data.amazing_props
 
-        if len(arm_data.amazing_split_rules) <= 1:
-            self.report({'WARNING'}, "At least one split rule must remain!")
-            return {'CANCELLED'}
-
         if self.rule_index >= len(arm_data.amazing_split_rules):
             self.report({'WARNING'}, "Invalid rule index!")
             return {'CANCELLED'}
 
-        rule_name = arm_data.amazing_split_rules[self.rule_index].name
+        rule = arm_data.amazing_split_rules[self.rule_index]
+        
+        # Prevent removing "Other" rule
+        if rule.name == "Other":
+            self.report({'WARNING'}, "Cannot remove the 'Other' rule (auto catch-all)!")
+            return {'CANCELLED'}
+
+        if len(arm_data.amazing_split_rules) <= 1:
+            self.report({'WARNING'}, "At least one split rule must remain!")
+            return {'CANCELLED'}
+
+        rule_name = rule.name
         arm_data.amazing_split_rules.remove(self.rule_index)
 
         for area in context.screen.areas:
@@ -1197,14 +1279,39 @@ class AMAZING_RIGGING_OT_toggle_split_rule(Operator):
     rule_index: IntProperty()
 
     def execute(self, context):
+        global _split_rules_hidden
         arm_data = context.armature if hasattr(context, "armature") else context.active_object.data
-        props = arm_data.amazing_props
 
         if self.rule_index >= len(arm_data.amazing_split_rules):
             return {'CANCELLED'}
 
-        rule = arm_data.amazing_split_rules[self.rule_index]
-        rule.is_hidden = not rule.is_hidden
+        rule_key = f"{arm_data.name}_{self.rule_index}"
+        current_hidden = _split_rules_hidden.get(rule_key, False)
+        _split_rules_hidden[rule_key] = not current_hidden
+
+        for area in context.screen.areas:
+            area.tag_redraw()
+
+        return {'FINISHED'}
+
+class AMAZING_RIGGING_OT_toggle_layer_editor_rule(Operator):
+    bl_idname = "armature.amazing_rigging_toggle_layer_editor_rule"
+    bl_label = "Toggle Layer Editor Rule"
+    bl_description = "Toggle layer editor rule visibility"
+    bl_options = {'INTERNAL'}
+
+    rule_index: IntProperty()
+
+    def execute(self, context):
+        global _layer_editor_rules_hidden
+        arm_data = context.armature if hasattr(context, "armature") else context.active_object.data
+
+        if self.rule_index >= len(arm_data.amazing_split_rules):
+            return {'CANCELLED'}
+
+        rule_key = f"{arm_data.name}_{self.rule_index}"
+        current_hidden = _layer_editor_rules_hidden.get(rule_key, False)
+        _layer_editor_rules_hidden[rule_key] = not current_hidden
 
         for area in context.screen.areas:
             area.tag_redraw()
@@ -1214,14 +1321,13 @@ class AMAZING_RIGGING_OT_toggle_split_rule(Operator):
 class AMAZING_RIGGING_OT_move_split_rule_up(Operator):
     bl_idname = "armature.amazing_rigging_move_split_rule_up"
     bl_label = "Move Split Rule Up"
-    bl_description = "Move this split rule up"
+    bl_description = "Move this split rule up (including all its items)"
     bl_options = {'REGISTER', 'UNDO'}
 
     rule_index: IntProperty()
 
     def execute(self, context):
         arm_data = context.armature if hasattr(context, "armature") else context.active_object.data
-        props = arm_data.amazing_props
 
         if self.rule_index <= 0:
             self.report({'WARNING'}, "Already at the top!")
@@ -1231,36 +1337,73 @@ class AMAZING_RIGGING_OT_move_split_rule_up(Operator):
             self.report({'WARNING'}, "Invalid rule index!")
             return {'CANCELLED'}
 
+        # Don't allow moving the "Other" rule
+        rule = arm_data.amazing_split_rules[self.rule_index]
+        if rule.name == "Other":
+            self.report({'WARNING'}, "Cannot move the 'Other' rule!")
+            return {'CANCELLED'}
+
+        # Move the rule
         arm_data.amazing_split_rules.move(self.rule_index, self.rule_index - 1)
+
+        # Update rule_index for all grid items
+        old_idx = self.rule_index
+        new_idx = self.rule_index - 1
+        for item in arm_data.amazing_grid_data:
+            if item.rule_index == old_idx:
+                item.rule_index = new_idx
+            elif item.rule_index == new_idx:
+                item.rule_index = old_idx
 
         for area in context.screen.areas:
             area.tag_redraw()
 
-        self.report({'INFO'}, "Moved split rule up")
+        self.report({'INFO'}, f"Moved rule from position {old_idx} to {new_idx}")
         return {'FINISHED'}
 
 class AMAZING_RIGGING_OT_move_split_rule_down(Operator):
     bl_idname = "armature.amazing_rigging_move_split_rule_down"
     bl_label = "Move Split Rule Down"
-    bl_description = "Move this split rule down"
+    bl_description = "Move this split rule down (including all its items)"
     bl_options = {'REGISTER', 'UNDO'}
 
     rule_index: IntProperty()
 
     def execute(self, context):
         arm_data = context.armature if hasattr(context, "armature") else context.active_object.data
-        props = arm_data.amazing_props
 
         if self.rule_index >= len(arm_data.amazing_split_rules) - 1:
             self.report({'WARNING'}, "Already at the bottom!")
             return {'CANCELLED'}
 
+        # Don't allow moving the "Other" rule
+        rule = arm_data.amazing_split_rules[self.rule_index]
+        if rule.name == "Other":
+            self.report({'WARNING'}, "Cannot move the 'Other' rule!")
+            return {'CANCELLED'}
+        
+        # Also don't allow moving a rule below Other
+        target_rule = arm_data.amazing_split_rules[self.rule_index + 1]
+        if target_rule.name == "Other":
+            self.report({'WARNING'}, "Cannot move below 'Other' rule!")
+            return {'CANCELLED'}
+
+        # Move the rule
         arm_data.amazing_split_rules.move(self.rule_index, self.rule_index + 1)
+
+        # Update rule_index for all grid items
+        old_idx = self.rule_index
+        new_idx = self.rule_index + 1
+        for item in arm_data.amazing_grid_data:
+            if item.rule_index == old_idx:
+                item.rule_index = new_idx
+            elif item.rule_index == new_idx:
+                item.rule_index = old_idx
 
         for area in context.screen.areas:
             area.tag_redraw()
 
-        self.report({'INFO'}, "Moved split rule down")
+        self.report({'INFO'}, f"Moved rule from position {old_idx} to {new_idx}")
         return {'FINISHED'}
 
 class AMAZING_RIGGING_OT_add_split_prefix(Operator):
@@ -1507,33 +1650,25 @@ class AMAZING_RIGGING_PT_split_bones_rules(Panel):
 
         props = arm_data.amazing_props
 
-        # Auto-initialize default rules if empty (should already be done by handler, but just in case)
-        if len(arm_data.amazing_split_rules) == 0:
-            rule1 = arm_data.amazing_split_rules.add()
-            rule1.name = "Ctrl Bones"
-            rule1.is_hidden = False
-            prefix1 = rule1.prefixes.add()
-            prefix1.value = "DEF-"
-            exact1 = rule1.exact_matches.add()
-            exact1.value = "Root"
-
-            rule2 = arm_data.amazing_split_rules.add()
-            rule2.name = "Other (Deform Bones)"
-            rule2.is_hidden = False
-            
-            print(f"[DEBUG] Auto-initialized {len(arm_data.amazing_split_rules)} split rules for {arm_data.name}")
-
         # Debug info
         row_debug = layout.row()
         row_debug.label(text=f"Split rules count: {len(arm_data.amazing_split_rules)}", icon='INFO')
 
-        # Draw each rule
+        # Draw each rule (EXCEPT "Other" which is auto-managed)
         for rule_idx, rule in enumerate(arm_data.amazing_split_rules):
+            # Skip "Other" rule (it's auto-managed, not shown in config panel)
+            if rule.name == "Other":
+                continue
+
             rule_box = layout.box()
+
+            # Use independent fold state per panel
+            rule_key = f"{arm_data.name}_{rule_idx}"
+            is_hidden = _split_rules_hidden.get(rule_key, False)
 
             # Rule header
             row_header = rule_box.row()
-            icon_type = 'TRIA_DOWN' if not rule.is_hidden else 'TRIA_RIGHT'
+            icon_type = 'TRIA_DOWN' if not is_hidden else 'TRIA_RIGHT'
 
             # Editable rule name
             editing_key = f"rule_name_{rule_idx}"
@@ -1550,7 +1685,7 @@ class AMAZING_RIGGING_PT_split_bones_rules(Panel):
                 edit_name_op.rule_index = rule_idx
 
             # Move/Delete buttons
-            if not rule.is_hidden:
+            if not is_hidden:
                 move_row = row_header.row(align=True)
                 move_up = move_row.operator("armature.amazing_rigging_move_split_rule_up", text="", icon='TRIA_UP')
                 move_up.rule_index = rule_idx
@@ -1561,7 +1696,7 @@ class AMAZING_RIGGING_PT_split_bones_rules(Panel):
             remove_op.rule_index = rule_idx
 
             # Rule content (when expanded)
-            if not rule.is_hidden:
+            if not is_hidden:
                 content_box = rule_box.box()
 
                 # Prefix section
@@ -1617,15 +1752,11 @@ class AMAZING_RIGGING_PT_split_bones_rules(Panel):
 
         # Add new rule button
         layout.operator("armature.amazing_rigging_add_split_rule", text="+ Add Split Rule", icon='ADD')
-
-        # Separator
         layout.separator()
-
-        # Init Amazing Rigging UI button
         layout.operator("armature.amazing_rigging_init", text="Init Amazing Rigging UI", icon='FILE_REFRESH')
 
 class AMAZING_RIGGING_PT_layer_editor(Panel):
-    bl_label = "Ctrl bones UI - Amazing Rigging"
+    bl_label = "Amazing Rigging UI Settings"
     bl_idname = "DATA_PT_amazing_rigging_ui_settings"
     bl_space_type = 'PROPERTIES'
     bl_region_type = 'WINDOW'
@@ -1643,21 +1774,7 @@ class AMAZING_RIGGING_PT_layer_editor(Panel):
         box = layout.box()
         box.label(text="Split Bones Rules", icon='SETTINGS')
 
-        # Initialize default rules if empty
-        if len(arm_data.amazing_split_rules) == 0:
-            rule1 = arm_data.amazing_split_rules.add()
-            rule1.name = "Ctrl Bones"
-            rule1.is_hidden = False
-            prefix1 = rule1.prefixes.add()
-            prefix1.value = "DEF-"
-            exact1 = rule1.exact_matches.add()
-            exact1.value = "Root"
-
-            rule2 = arm_data.amazing_split_rules.add()
-            rule2.name = "Other (Deform Bones)"
-            rule2.is_hidden = False
-
-        # Draw each rule
+        # Draw each rule (skip "Other" rule - it's auto-managed)
         for rule_idx, rule in enumerate(arm_data.amazing_split_rules):
             rule_box = box.box()
 
@@ -1746,171 +1863,182 @@ class AMAZING_RIGGING_PT_layer_editor(Panel):
 
         grid_data = getattr(arm_data, "amazing_grid_data", [])
         pockets = getattr(arm_data, "amazing_bone_pockets", [])
-        pocket_rows = {pocket.row for pocket in pockets}
 
-        editing_key = arm_data.amazing_props.editing_item_key
-        editing_pocket_key = arm_data.amazing_props.editing_pocket_key
+        if len(grid_data) == 0:
+            layout.label(text="Please initialize data first", icon='INFO')
+            return
+
+        # Draw each rule's data
+        for rule_idx, rule in enumerate(arm_data.amazing_split_rules):
+            # Filter items for this rule
+            rule_items = [item for item in grid_data if item.rule_index == rule_idx]
+            
+            if not rule_items:
+                continue
+
+            # Rule header with fold button
+            rule_box = layout.box()
+            rule_header = rule_box.row()
+            
+            # Use independent fold state for layer editor
+            rule_key = f"{arm_data.name}_{rule_idx}"
+            is_hidden = _layer_editor_rules_hidden.get(rule_key, False)
+            icon_type = 'TRIA_RIGHT' if is_hidden else 'TRIA_DOWN'
+            
+            # Toggle button
+            toggle_op = rule_header.operator("armature.amazing_rigging_toggle_layer_editor_rule", text=f"{rule.name}", icon=icon_type, emboss=False)
+            toggle_op.rule_index = rule_idx
+            
+            rule_header.label(text=f"({len(rule_items)} items)", icon='INFO')
+
+            # Draw grid data for this rule (when expanded)
+            if not is_hidden:
+                # Filter pockets that apply to this rule's rows AND rule_index
+                rule_rows = {item.row for item in rule_items}
+                rule_pockets = [p for p in pockets if p.row in rule_rows and p.rule_index == rule_idx]
+                pocket_rows = {p.row for p in rule_pockets}
+
+                # Draw grid data for this rule inside rule box
+                rule_content = rule_box.box()
+                self.draw_rule_grid(rule_content, arm_data, rule_items, rule_pockets, pocket_rows, rule_idx)
+
+    def draw_rule_grid(self, layout, arm_data, grid_data, pockets, pocket_rows, rule_idx):
+        """Draw grid data for a single rule (same as old draw logic)"""
+        props = arm_data.amazing_props
+        editing_key = props.editing_item_key
+        editing_pocket_key = props.editing_pocket_key
+
+        sorted_items = sorted(grid_data, key=lambda x: (x.row, x.col))
+        rows_dict = {}
+        for item in sorted_items:
+            if item.row not in rows_dict:
+                rows_dict[item.row] = []
+            rows_dict[item.row].append(item)
+
+        existing_rows = sorted(rows_dict.keys())
+        all_rows = set(existing_rows)
+        
+        if len(existing_rows) > 0:
+            min_row = existing_rows[0]
+            max_row = existing_rows[-1]
+            for i in range(min_row, max_row + 1):
+                all_rows.add(i)
+
+        for pocket_row in pocket_rows:
+            all_rows.add(pocket_row)
 
         if editing_key:
-            print(f"\n[DEBUG] Draw - Current editing_key: '{editing_key}'")
-
             parts = editing_key.split("_")
-            if len(parts) == 2:
-                row = int(parts[0])
-                col = int(parts[1])
+            if len(parts) == 3:
+                editing_rule_idx = int(parts[0])
+                editing_row = int(parts[1])
+                if editing_rule_idx == rule_idx:
+                    all_rows.add(editing_row)
 
-                item_exists = False
-                for item in grid_data:
-                    if item.row == row and item.col == col:
-                        item_exists = True
-                        break
+        sorted_all_rows = sorted(all_rows)
 
-                if not item_exists:
-                    print(f"[DEBUG] Draw - Item {editing_key} not found, clearing editing_key")
-                    # arm_data.amazing_props.editing_item_key = ""
-                    editing_key = ""
-                    # for area in context.screen.areas:
-                    #     area.tag_redraw()
-                    return
+        for row_idx in sorted_all_rows:
+            row_items = rows_dict.get(row_idx, [])
+            box = layout.box()
 
-        pocket_editing_row = -1
-        if editing_pocket_key:
-            for pocket in pockets:
-                if f"{pocket.row}" == editing_pocket_key:
-                    pocket_editing_row = pocket.row
-                    print(f"[DEBUG] Draw - Valid pocket editing: row={pocket_editing_row}")
-                    break
-            if pocket_editing_row == -1:
-                print(f"[DEBUG] Draw - Invalid editing_pocket_key: '{editing_pocket_key}, ignoring")
-
-        if len(grid_data) > 0:
-            sorted_items = sorted(grid_data, key=lambda x: (x.row, x.col))
-
-            rows_dict = {}
-            for item in sorted_items:
-                if item.row not in rows_dict:
-                    rows_dict[item.row] = []
-                rows_dict[item.row].append(item)
-
-            existing_rows = sorted(rows_dict.keys())
-
-            all_rows = set(existing_rows)
-            if len(existing_rows) > 0:
-                min_row = existing_rows[0]
-                max_row = existing_rows[-1]
-                for i in range(min_row, max_row + 1):
-                    all_rows.add(i)
-
-            for pocket_row in pocket_rows:
-                all_rows.add(pocket_row)
-
-            editing_key_row = -1
+            is_row_active = False
             if editing_key:
                 parts = editing_key.split("_")
-                if len(parts) == 2:
-                    editing_row = int(parts[0])
-                    all_rows.add(editing_row)
-                    editing_key_row = editing_row
-
-            sorted_all_rows = sorted(all_rows)
-            total_rows = len(sorted_all_rows)
-
-            for row_idx in sorted_all_rows:
-                row_items = rows_dict.get(row_idx, [])
-                box = layout.box()
-
-                is_row_active = False
-                if editing_key:
-                    parts = editing_key.split("_")
-                    if len(parts) == 2:
-                        active_row = int(parts[0])
+                if len(parts) == 3:
+                    active_rule_idx = int(parts[0])
+                    active_row = int(parts[1])
+                    if active_rule_idx == rule_idx:
                         is_row_active = (active_row == row_idx)
-                        if is_row_active:
-                            print(f"[DEBUG] Draw - Row {row_idx} is active row")
 
-                row_header = box.row()
-                row_header.label(text=f"{row_idx}")
-                row_header.alignment = 'RIGHT'
+            row_header = box.row()
+            row_header.label(text=f"{row_idx}")
+            row_header.alignment = 'RIGHT'
 
-                insert_op = row_header.operator("armature.amazing_rigging_insert", text="", icon='ADD')
-                insert_op.target_row = row_idx
+            insert_op = row_header.operator("armature.amazing_rigging_insert", text="", icon='ADD')
+            insert_op.target_row = row_idx
+            insert_op.rule_index = rule_idx
 
-                if row_idx not in pocket_rows:
-                    add_pocket_op = row_header.operator("armature.amazing_rigging_add_bone_pocket", text="", icon='COLLECTION_NEW')
-                    add_pocket_op.target_row = row_idx
+            if row_idx not in pocket_rows:
+                add_pocket_op = row_header.operator("armature.amazing_rigging_add_bone_pocket", text="", icon='COLLECTION_NEW')
+                add_pocket_op.target_row = row_idx
+                add_pocket_op.rule_index = rule_idx
 
-                move_buttons_row = row_header.row()
-                if is_row_active and len(row_items) > 1:
-                    move_buttons_row.operator("armature.amazing_rigging_move_col_left", text="", icon='TRIA_LEFT')
-                    move_buttons_row.operator("armature.amazing_rigging_move_col_right", text="", icon='TRIA_RIGHT')
+            # Show col move buttons ONLY when editing AND row has > 1 items
+            move_buttons_row = row_header.row()
+            if is_row_active and len(row_items) > 1:
+                move_buttons_row.operator("armature.amazing_rigging_move_col_left", text="", icon='TRIA_LEFT')
+                move_buttons_row.operator("armature.amazing_rigging_move_col_right", text="", icon='TRIA_RIGHT')
 
-                is_top_row = row_idx > 0
-                row_up = row_header.row()
-                row_up.enabled = is_top_row
-                row_up_op = row_up.operator("armature.amazing_rigging_move_row_up", text="", icon="TRIA_UP")
-                row_up_op.target_row = row_idx
+            is_top_row = row_idx > 0
+            row_up = row_header.row()
+            row_up.enabled = is_top_row
+            row_up_op = row_up.operator("armature.amazing_rigging_move_row_up", text="", icon="TRIA_UP")
+            row_up_op.target_row = row_idx
+            row_up_op.rule_index = rule_idx
 
-                if row_idx in pocket_rows:
-                    pocket_col_flow = box.column_flow(align=True)
-                    pocket_box = pocket_col_flow.row()
+            # Pocket display
+            if row_idx in pocket_rows:
+                pocket_col_flow = box.column_flow(align=True)
+                pocket_box = pocket_col_flow.row()
 
-                    for pocket in pockets:
-                        if pocket.row == row_idx:
-                            is_editing_pocket = (pocket_editing_row == pocket.row)
+                for pocket in pockets:
+                    if pocket.row == row_idx and pocket.rule_index == rule_idx:
+                        is_editing_pocket = (f"{rule_idx}_{pocket.row}" == editing_pocket_key)
 
-                            if is_editing_pocket:
-                                print(f"[DEBUG] Draw - Showing edit box for pocket row={pocket.row}")
-                                pocket_box.prop(pocket, "name", text="")
-                            else:
-                                edit_op = pocket_box.operator("armature.amazing_rigging_edit_bone_pocket", text=pocket.name, icon='COLLECTION_NEW')
-                                edit_op.target_row = row_idx
-
-                            pocket_remove_op = pocket_box.operator("armature.amazing_rigging_remove_bone_pocket", text="", icon='X')
-                            pocket_remove_op.target_row = row_idx
-                            break
-
-                if len(row_items) > 0:
-                    col_flow = box.column_flow(columns=len(row_items), align=True)
-
-                    for item in row_items:
-                        row_box = col_flow.box()
-                        row = row_box.row(align=True)
-
-                        item_key = f"{item.row}_{item.col}"
-                        editing_key = f"{item.row}_{item.col}"
-                        is_editing = arm_data.amazing_props.editing_item_key == editing_key
-                        is_placeholder = (item.name == "")
-
-                        if is_placeholder:
-                            row.label(text="Empty Row", icon='DOT')
-                        elif is_editing:
-                            print(f"[DEBUG] Draw - Editing item: {editing_key}")
-                            row.prop(item, "note", text="")
+                        if is_editing_pocket:
+                            pocket_box.prop(pocket, "name", text="")
                         else:
-                            edit_op = row.operator("armature.amazing_rigging_edit_note", text=item.note)
-                            edit_op.item_name = item.name
-                            edit_op.target_row = item.row
-                            edit_op.target_col = item.col
+                            edit_op = pocket_box.operator("armature.amazing_rigging_edit_bone_pocket", text=pocket.name, icon='COLLECTION_NEW')
+                            edit_op.target_row = row_idx
+                            edit_op.rule_index = rule_idx
 
-                            remove_op = row.operator("armature.amazing_rigging_remove", text="", icon='X')
-                            remove_op.item_name = item.name
-                            remove_op.target_row = item.row
-                            remove_op.target_col = item.col
+                        pocket_remove_op = pocket_box.operator("armature.amazing_rigging_remove_bone_pocket", text="", icon='X')
+                        pocket_remove_op.target_row = row_idx
+                        pocket_remove_op.rule_index = rule_idx
+                        break
 
-                row_footer = box.row()
-                row_footer.alignment = 'RIGHT'
+            # Items display
+            if len(row_items) > 0:
+                col_flow = box.column_flow(columns=len(row_items), align=True)
 
-                is_last_row = (row_idx > sorted_all_rows[-1] if sorted_all_rows else True)
-                row_footer.enabled = not is_last_row
-                insert_row_op = row_footer.operator("armature.amazing_rigging_insert_row", text="", icon='TRIA_DOWN_BAR')
-                insert_row_op.target_row = row_idx
-                delete_row_op = row_footer.operator("armature.amazing_rigging_ot_delete_row", text="", icon='TRASH')
-                delete_row_op.target_row = row_idx
-                row_down_op = row_footer.operator("armature.amazing_rigging_move_row_down", text="", icon='TRIA_DOWN')
-                row_down_op.target_row = row_idx
+                for item in row_items:
+                    row_box = col_flow.box()
+                    row = row_box.row(align=True)
 
-        else:
-            layout.label(text="Please initialize data first", icon='INFO')
+                    item_key = f"{rule_idx}_{item.row}_{item.col}"
+                    is_editing = props.editing_item_key == item_key
+                    is_placeholder = (item.name == "")
+
+                    if is_placeholder:
+                        row.label(text="Empty Row", icon='DOT')
+                    elif is_editing:
+                        row.prop(item, "note", text="")
+                    else:
+                        edit_op = row.operator("armature.amazing_rigging_edit_note", text=item.note)
+                        edit_op.item_name = item.name
+                        edit_op.target_row = item.row
+                        edit_op.target_col = item.col
+                        edit_op.rule_index = rule_idx
+
+                        remove_op = row.operator("armature.amazing_rigging_remove", text="", icon='X')
+                        remove_op.item_name = item.name
+                        remove_op.target_row = item.row
+                        remove_op.target_col = item.col
+
+            row_footer = box.row()
+            row_footer.alignment = 'RIGHT'
+
+            is_last_row = (row_idx > sorted_all_rows[-1] if sorted_all_rows else True)
+            row_footer.enabled = not is_last_row
+            insert_row_op = row_footer.operator("armature.amazing_rigging_insert_row", text="", icon='TRIA_DOWN_BAR')
+            insert_row_op.target_row = row_idx
+            insert_row_op.rule_index = rule_idx
+            delete_row_op = row_footer.operator("armature.amazing_rigging_ot_delete_row", text="", icon='TRASH')
+            delete_row_op.target_row = row_idx
+            delete_row_op.rule_index = rule_idx
+            row_down_op = row_footer.operator("armature.amazing_rigging_move_row_down", text="", icon='TRIA_DOWN')
+            row_down_op.target_row = row_idx
+            row_down_op.rule_index = rule_idx
 
 classes = [
     AMAZING_RIGGING_StringItem,
@@ -1939,6 +2067,7 @@ classes = [
     AMAZING_RIGGING_OT_add_split_rule,
     AMAZING_RIGGING_OT_remove_split_rule,
     AMAZING_RIGGING_OT_toggle_split_rule,
+    AMAZING_RIGGING_OT_toggle_layer_editor_rule,
     AMAZING_RIGGING_OT_move_split_rule_up,
     AMAZING_RIGGING_OT_move_split_rule_down,
     AMAZING_RIGGING_OT_add_split_prefix,
