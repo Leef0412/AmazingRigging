@@ -404,6 +404,9 @@ def initialize_all_caches():
         import traceback
         traceback.print_exc()
     
+    # 初始化默认 split rules
+    initialize_default_split_rules()
+    
     print("=== [DEBUG] initialize_all_caches 结束 ===\n")
     return None  # 只执行一次
 
@@ -411,6 +414,44 @@ def initialize_all_caches():
 def delayed_initialize():
     """延迟初始化包装函数"""
     return initialize_all_caches()
+
+
+def initialize_default_split_rules():
+    """为所有 armature 初始化默认 split rules（如果没有的话）"""
+    print("\n=== [DEBUG] initialize_default_split_rules 开始 ===")
+    try:
+        for armature in bpy.data.armatures:
+            if hasattr(armature, "amazing_split_rules"):
+                # 只有在规则为空时才初始化
+                if len(armature.amazing_split_rules) == 0:
+                    print(f"[DEBUG] 为 {armature.name} 初始化默认 split rules")
+                    
+                    # 创建默认规则 1: Ctrl Bones
+                    rule1 = armature.amazing_split_rules.add()
+                    rule1.name = "Ctrl Bones"
+                    rule1.is_hidden = False
+                    prefix1 = rule1.prefixes.add()
+                    prefix1.value = "DEF-"
+                    exact1 = rule1.exact_matches.add()
+                    exact1.value = "Root"
+
+                    # 创建默认规则 2: Other (Deform Bones)
+                    rule2 = armature.amazing_split_rules.add()
+                    rule2.name = "Other (Deform Bones)"
+                    rule2.is_hidden = False
+                    
+                    print(f"[DEBUG] 已为 {armature.name} 创建 {len(armature.amazing_split_rules)} 个默认规则")
+                else:
+                    print(f"[DEBUG] {armature.name} 已有 {len(armature.amazing_split_rules)} 个 split rules，跳过初始化")
+            else:
+                print(f"[DEBUG] 跳过 {armature.name}: 缺少 amazing_split_rules 属性")
+    except Exception as e:
+        print(f"[ERROR] initialize_default_split_rules 错误: {e}")
+        import traceback
+        traceback.print_exc()
+    
+    print("=== [DEBUG] initialize_default_split_rules 结束 ===\n")
+    return None  # 只执行一次
 
 
 # 注册类列表
@@ -432,6 +473,7 @@ def register():
     bpy.types.Armature.amazing_deform_grid_data = bpy.props.CollectionProperty(type=ui_layer_editor.AMAZING_RIGGING_CollectionItem)
     bpy.types.Armature.amazing_props = bpy.props.PointerProperty(type=ui_layer_editor.AMAZING_RIGGING_ArmatureProperties)
     bpy.types.Armature.amazing_bone_pockets = bpy.props.CollectionProperty(type=ui_layer_editor.AMAZING_RIGGING_Bone_Pocket)
+    bpy.types.Armature.amazing_split_rules = bpy.props.CollectionProperty(type=ui_layer_editor.AMAZING_RIGGING_SplitRule)
     print("属性注册完成")
 
     bpy.app.handlers.depsgraph_update_post.append(depsgraph_update_handler)
@@ -464,6 +506,9 @@ def unregister():
 
     if hasattr(bpy.types.Armature, "amazing_bone_pockets"):
         del bpy.types.Armature.amazing_bone_pockets
+
+    if hasattr(bpy.types.Armature, "amazing_split_rules"):
+        del bpy.types.Armature.amazing_split_rules
 
     if depsgraph_update_handler in bpy.app.handlers.depsgraph_update_post:
         bpy.app.handlers.depsgraph_update_post.remove(depsgraph_update_handler)

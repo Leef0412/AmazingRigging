@@ -224,7 +224,6 @@ class AMAZING_RIGGING_PT_main_sidebar(Panel):
 
                         toggle_op = pocket_row_ui.operator("armature.amazing_rigging_toggle_bone_pocket", text=pocket.name, icon=icon_type, emboss=False)
                         toggle_op.pocket_row = pocket.row
-                        # pocket_row_ui.prop(pocket, "is_hidden", text=pocket.name, icon=icon_type, toggle=True, emboss=False)
                         pocket_row_ui.alignment = 'CENTER'
                         break
 
@@ -248,6 +247,106 @@ class AMAZING_RIGGING_PT_main_sidebar(Panel):
                             row_flow.prop(b_col, "is_visible", text=item.note, toggle=True)
                         else:
                             row_flow.label(text=item.note)
+
+        # ========== Draw Split Bones Collections ==========
+        self.draw_split_bones_collections(layout, arm_data, target_armature)
+
+    def draw_split_bones_collections(self, layout, arm_data, target_armature):
+        """Draw bone collections based on split rules"""
+        props = arm_data.amazing_props
+
+        # If no split rules, skip
+        if len(arm_data.amazing_split_rules) == 0:
+            return
+
+        b_cols = getattr(arm_data, "collections", None)
+        if not b_cols:
+            return
+
+        # Get all bones and classify them by split rules
+        bones = arm_data.bones
+        if not bones:
+            return
+
+        # Track which collections have been matched
+        matched_collection_names = set()
+
+        # First pass: match collections with rules that have prefixes/exact matches
+        rule_matches = {}  # rule_idx -> list of collection names
+
+        for rule_idx, rule in enumerate(arm_data.amazing_split_rules):
+            rule_matches[rule_idx] = []
+
+            # Skip rules with no prefixes and no exact matches (they're "catch-all" rules)
+            has_prefixes = len(rule.prefixes) > 0 and any(p.value for p in rule.prefixes)
+            has_exact = len(rule.exact_matches) > 0 and any(e.value for e in rule.exact_matches)
+
+            if not has_prefixes and not has_exact:
+                continue
+
+            for b_col in b_cols:
+                # Skip if already matched
+                if b_col.name in matched_collection_names:
+                    continue
+
+                # Check if any bone in this collection matches the rule
+                should_include = False
+
+                for bone in b_col.bones:
+                    bone_name = bone.name
+
+                    # Check prefixes
+                    for prefix_item in rule.prefixes:
+                        if prefix_item.value and bone_name.startswith(prefix_item.value):
+                            should_include = True
+                            break
+
+                    # Check exact matches
+                    if not should_include:
+                        for exact_item in rule.exact_matches:
+                            if exact_item.value and bone_name == exact_item.value:
+                                should_include = True
+                                break
+
+                    if should_include:
+                        break
+
+                if should_include:
+                    rule_matches[rule_idx].append(b_col.name)
+                    matched_collection_names.add(b_col.name)
+
+        # Second pass: assign unmatched collections to catch-all rules
+        for rule_idx, rule in enumerate(arm_data.amazing_split_rules):
+            has_prefixes = len(rule.prefixes) > 0 and any(p.value for p in rule.prefixes)
+            has_exact = len(rule.exact_matches) > 0 and any(e.value for e in rule.exact_matches)
+
+            if not has_prefixes and not has_exact:
+                # This is a catch-all rule, add unmatched collections
+                for b_col in b_cols:
+                    if b_col.name not in matched_collection_names:
+                        rule_matches[rule_idx].append(b_col.name)
+                        matched_collection_names.add(b_col.name)
+
+        # Draw each rule's collections
+        for rule_idx, rule in enumerate(arm_data.amazing_split_rules):
+            if rule.is_hidden:
+                continue
+
+            matched_collections = rule_matches.get(rule_idx, [])
+
+            if matched_collections:
+                row_label = layout.row()
+                row_label.label(text=f"{rule.name}", icon='GROUP_BONE')
+
+                row_flow = layout.row(align=True)
+                for col_name in matched_collections:
+                    if b_cols and col_name in b_cols:
+                        b_col = b_cols[col_name]
+                        row_flow.prop(b_col, "is_visible", text=col_name, toggle=True)
+                    else:
+                        row_flow.label(text=col_name)
+
+                layout.separator()
 
 classes = [
     AMAZING_RIGGING_OT_toggle_bone_collection,

@@ -2,6 +2,15 @@ import bpy
 from bpy.types import Panel, PropertyGroup, Operator
 from bpy.props import StringProperty, IntProperty, BoolProperty, CollectionProperty
 
+class AMAZING_RIGGING_StringItem(PropertyGroup):
+    value: StringProperty(name="Value", default="")
+
+class AMAZING_RIGGING_SplitRule(PropertyGroup):
+    name: StringProperty(name="Rule Name", default="New Rule")
+    is_hidden: BoolProperty(name="Hidden", default=False)
+    prefixes: CollectionProperty(type=AMAZING_RIGGING_StringItem)
+    exact_matches: CollectionProperty(type=AMAZING_RIGGING_StringItem)
+
 class AMAZING_RIGGING_CollectionItem(PropertyGroup):
     name: StringProperty(name="Bone Name")
     row: IntProperty(name="Row", default=0)
@@ -17,6 +26,8 @@ class AMAZING_RIGGING_Bone_Pocket(PropertyGroup):
 class AMAZING_RIGGING_ArmatureProperties(PropertyGroup):
     editing_item_key: StringProperty(name="Editing Item Key", default="")
     editing_pocket_key: StringProperty(name="Editing Pocket Key", default="")
+    editing_split_rule_key: StringProperty(name="Editing Split Rule Key", default="")
+    editing_string_key: StringProperty(name="Editing String Key", default="")
 
 class AMAZING_RIGGING_OT_init_data(Operator):
     bl_idname = "armature.amazing_rigging_init"
@@ -1093,6 +1104,526 @@ class AMAZING_RIGGING_OT_toggle_bone_pocket(Operator):
 
         return {'CANCELLED'}
 
+# ========== Split Bones Rules Operators ==========
+
+class AMAZING_RIGGING_OT_init_split_rules(Operator):
+    bl_idname = "armature.amazing_rigging_init_split_rules"
+    bl_label = "Initialize Split Rules"
+    bl_description = "Initialize default split rules"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        arm_data = context.armature if hasattr(context, "armature") else context.active_object.data
+
+        # Clear existing
+        arm_data.amazing_split_rules.clear()
+
+        # Add default rules
+        rule1 = arm_data.amazing_split_rules.add()
+        rule1.name = "Ctrl Bones"
+        rule1.is_hidden = False
+        prefix1 = rule1.prefixes.add()
+        prefix1.value = "DEF-"
+        exact1 = rule1.exact_matches.add()
+        exact1.value = "Root"
+
+        rule2 = arm_data.amazing_split_rules.add()
+        rule2.name = "Other (Deform Bones)"
+        rule2.is_hidden = False
+
+        print(f"[DEBUG] Initialized {len(arm_data.amazing_split_rules)} split rules")
+
+        for area in context.screen.areas:
+            area.tag_redraw()
+
+        self.report({'INFO'}, f"Initialized {len(arm_data.amazing_split_rules)} split rules")
+        return {'FINISHED'}
+
+class AMAZING_RIGGING_OT_add_split_rule(Operator):
+    bl_idname = "armature.amazing_rigging_add_split_rule"
+    bl_label = "Add Split Rule"
+    bl_description = "Add a new split rule for bone collections"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        arm_data = context.armature if hasattr(context, "armature") else context.active_object.data
+        props = arm_data.amazing_props
+
+        rule = arm_data.amazing_split_rules.add()
+        rule.name = "New Rule"
+        rule.is_hidden = False
+
+        for area in context.screen.areas:
+            area.tag_redraw()
+
+        self.report({'INFO'}, f"Added split rule: {rule.name}")
+        return {'FINISHED'}
+
+class AMAZING_RIGGING_OT_remove_split_rule(Operator):
+    bl_idname = "armature.amazing_rigging_remove_split_rule"
+    bl_label = "Remove Split Rule"
+    bl_description = "Remove this split rule"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    rule_index: IntProperty()
+
+    def execute(self, context):
+        arm_data = context.armature if hasattr(context, "armature") else context.active_object.data
+        props = arm_data.amazing_props
+
+        if len(arm_data.amazing_split_rules) <= 1:
+            self.report({'WARNING'}, "At least one split rule must remain!")
+            return {'CANCELLED'}
+
+        if self.rule_index >= len(arm_data.amazing_split_rules):
+            self.report({'WARNING'}, "Invalid rule index!")
+            return {'CANCELLED'}
+
+        rule_name = arm_data.amazing_split_rules[self.rule_index].name
+        arm_data.amazing_split_rules.remove(self.rule_index)
+
+        for area in context.screen.areas:
+            area.tag_redraw()
+
+        self.report({'INFO'}, f"Removed split rule: {rule_name}")
+        return {'FINISHED'}
+
+class AMAZING_RIGGING_OT_toggle_split_rule(Operator):
+    bl_idname = "armature.amazing_rigging_toggle_split_rule"
+    bl_label = "Toggle Split Rule"
+    bl_description = "Toggle split rule visibility"
+    bl_options = {'INTERNAL'}
+
+    rule_index: IntProperty()
+
+    def execute(self, context):
+        arm_data = context.armature if hasattr(context, "armature") else context.active_object.data
+        props = arm_data.amazing_props
+
+        if self.rule_index >= len(arm_data.amazing_split_rules):
+            return {'CANCELLED'}
+
+        rule = arm_data.amazing_split_rules[self.rule_index]
+        rule.is_hidden = not rule.is_hidden
+
+        for area in context.screen.areas:
+            area.tag_redraw()
+
+        return {'FINISHED'}
+
+class AMAZING_RIGGING_OT_move_split_rule_up(Operator):
+    bl_idname = "armature.amazing_rigging_move_split_rule_up"
+    bl_label = "Move Split Rule Up"
+    bl_description = "Move this split rule up"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    rule_index: IntProperty()
+
+    def execute(self, context):
+        arm_data = context.armature if hasattr(context, "armature") else context.active_object.data
+        props = arm_data.amazing_props
+
+        if self.rule_index <= 0:
+            self.report({'WARNING'}, "Already at the top!")
+            return {'CANCELLED'}
+
+        if self.rule_index >= len(arm_data.amazing_split_rules):
+            self.report({'WARNING'}, "Invalid rule index!")
+            return {'CANCELLED'}
+
+        arm_data.amazing_split_rules.move(self.rule_index, self.rule_index - 1)
+
+        for area in context.screen.areas:
+            area.tag_redraw()
+
+        self.report({'INFO'}, "Moved split rule up")
+        return {'FINISHED'}
+
+class AMAZING_RIGGING_OT_move_split_rule_down(Operator):
+    bl_idname = "armature.amazing_rigging_move_split_rule_down"
+    bl_label = "Move Split Rule Down"
+    bl_description = "Move this split rule down"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    rule_index: IntProperty()
+
+    def execute(self, context):
+        arm_data = context.armature if hasattr(context, "armature") else context.active_object.data
+        props = arm_data.amazing_props
+
+        if self.rule_index >= len(arm_data.amazing_split_rules) - 1:
+            self.report({'WARNING'}, "Already at the bottom!")
+            return {'CANCELLED'}
+
+        arm_data.amazing_split_rules.move(self.rule_index, self.rule_index + 1)
+
+        for area in context.screen.areas:
+            area.tag_redraw()
+
+        self.report({'INFO'}, "Moved split rule down")
+        return {'FINISHED'}
+
+class AMAZING_RIGGING_OT_add_split_prefix(Operator):
+    bl_idname = "armature.amazing_rigging_add_split_prefix"
+    bl_label = "Add Prefix"
+    bl_description = "Add a new prefix to this split rule"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    rule_index: IntProperty()
+
+    def execute(self, context):
+        arm_data = context.armature if hasattr(context, "armature") else context.active_object.data
+        props = arm_data.amazing_props
+
+        if self.rule_index >= len(arm_data.amazing_split_rules):
+            self.report({'WARNING'}, "Invalid rule index!")
+            return {'CANCELLED'}
+
+        rule = arm_data.amazing_split_rules[self.rule_index]
+        prefix_item = rule.prefixes.add()
+        prefix_item.value = ""
+
+        for area in context.screen.areas:
+            area.tag_redraw()
+
+        self.report({'INFO'}, f"Added prefix to {rule.name}")
+        return {'FINISHED'}
+
+class AMAZING_RIGGING_OT_remove_split_prefix(Operator):
+    bl_idname = "armature.amazing_rigging_remove_split_prefix"
+    bl_label = "Remove Prefix"
+    bl_description = "Remove this prefix"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    rule_index: IntProperty()
+    prefix_index: IntProperty()
+
+    def execute(self, context):
+        arm_data = context.armature if hasattr(context, "armature") else context.active_object.data
+        props = arm_data.amazing_props
+
+        if self.rule_index >= len(arm_data.amazing_split_rules):
+            self.report({'WARNING'}, "Invalid rule index!")
+            return {'CANCELLED'}
+
+        rule = arm_data.amazing_split_rules[self.rule_index]
+        if self.prefix_index >= len(rule.prefixes):
+            self.report({'WARNING'}, "Invalid prefix index!")
+            return {'CANCELLED'}
+
+        rule.prefixes.remove(self.prefix_index)
+
+        for area in context.screen.areas:
+            area.tag_redraw()
+
+        self.report({'INFO'}, "Removed prefix")
+        return {'FINISHED'}
+
+class AMAZING_RIGGING_OT_add_split_exact(Operator):
+    bl_idname = "armature.amazing_rigging_add_split_exact"
+    bl_label = "Add Exact Match"
+    bl_description = "Add a new exact match to this split rule"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    rule_index: IntProperty()
+
+    def execute(self, context):
+        arm_data = context.armature if hasattr(context, "armature") else context.active_object.data
+        props = arm_data.amazing_props
+
+        if self.rule_index >= len(arm_data.amazing_split_rules):
+            self.report({'WARNING'}, "Invalid rule index!")
+            return {'CANCELLED'}
+
+        rule = arm_data.amazing_split_rules[self.rule_index]
+        exact_item = rule.exact_matches.add()
+        exact_item.value = ""
+
+        for area in context.screen.areas:
+            area.tag_redraw()
+
+        self.report({'INFO'}, f"Added exact match to {rule.name}")
+        return {'FINISHED'}
+
+class AMAZING_RIGGING_OT_remove_split_exact(Operator):
+    bl_idname = "armature.amazing_rigging_remove_split_exact"
+    bl_label = "Remove Exact Match"
+    bl_description = "Remove this exact match"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    rule_index: IntProperty()
+    exact_index: IntProperty()
+
+    def execute(self, context):
+        arm_data = context.armature if hasattr(context, "armature") else context.active_object.data
+        props = arm_data.amazing_props
+
+        if self.rule_index >= len(arm_data.amazing_split_rules):
+            self.report({'WARNING'}, "Invalid rule index!")
+            return {'CANCELLED'}
+
+        rule = arm_data.amazing_split_rules[self.rule_index]
+        if self.exact_index >= len(rule.exact_matches):
+            self.report({'WARNING'}, "Invalid exact match index!")
+            return {'CANCELLED'}
+
+        rule.exact_matches.remove(self.exact_index)
+
+        for area in context.screen.areas:
+            area.tag_redraw()
+
+        self.report({'INFO'}, "Removed exact match")
+        return {'FINISHED'}
+
+class AMAZING_RIGGING_OT_edit_split_rule_name(Operator):
+    bl_idname = "armature.amazing_rigging_edit_split_rule_name"
+    bl_label = "Edit Split Rule Name"
+    bl_description = "Edit split rule name"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    rule_index: IntProperty()
+
+    def modal(self, context, event):
+        arm_data = context.armature if hasattr(context, "armature") else context.active_object.data
+        props = arm_data.amazing_props
+
+        if event.type == 'ESC':
+            props.editing_split_rule_key = ""
+            context.window_manager.event_timer_remove(self._timer)
+            return {'CANCELLED'}
+
+        if event.type == 'RET' or event.type == 'NUMPAD_ENTER':
+            props.editing_split_rule_key = ""
+            context.window_manager.event_timer_remove(self._timer)
+            return {'FINISHED'}
+
+        return {'PASS_THROUGH'}
+
+    def invoke(self, context, event):
+        arm_data = context.armature if hasattr(context, "armature") else context.active_object.data
+        props = arm_data.amazing_props
+
+        props.editing_split_rule_key = f"rule_name_{self.rule_index}"
+
+        wm = context.window_manager
+        self._timer = wm.event_timer_add(0.05, window=context.window)
+        wm.modal_handler_add(self)
+
+        for area in context.screen.areas:
+            area.tag_redraw()
+
+        return {'RUNNING_MODAL'}
+
+class AMAZING_RIGGING_OT_edit_string_item(Operator):
+    bl_idname = "armature.amazing_rigging_edit_string_item"
+    bl_label = "Edit String Item"
+    bl_description = "Edit prefix or exact match value"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    rule_index: IntProperty()
+    string_type: StringProperty()  # 'prefix' or 'exact'
+    string_index: IntProperty()
+    original_value: StringProperty()
+
+    def modal(self, context, event):
+        arm_data = context.armature if hasattr(context, "armature") else context.active_object.data
+        props = arm_data.amazing_props
+
+        if event.type == 'ESC':
+            if self.rule_index < len(arm_data.amazing_split_rules):
+                rule = arm_data.amazing_split_rules[self.rule_index]
+                if self.string_type == 'prefix' and self.string_index < len(rule.prefixes):
+                    rule.prefixes[self.string_index].value = self.original_value
+                elif self.string_type == 'exact' and self.string_index < len(rule.exact_matches):
+                    rule.exact_matches[self.string_index].value = self.original_value
+
+            props.editing_string_key = ""
+            context.window_manager.event_timer_remove(self._timer)
+            return {'CANCELLED'}
+
+        if event.type == 'RET' or event.type == 'NUMPAD_ENTER':
+            props.editing_string_key = ""
+            context.window_manager.event_timer_remove(self._timer)
+            return {'FINISHED'}
+
+        return {'PASS_THROUGH'}
+
+    def invoke(self, context, event):
+        arm_data = context.armature if hasattr(context, "armature") else context.active_object.data
+        props = arm_data.amazing_props
+
+        if self.rule_index >= len(arm_data.amazing_split_rules):
+            self.report({'WARNING'}, "Invalid rule index!")
+            return {'CANCELLED'}
+
+        rule = arm_data.amazing_split_rules[self.rule_index]
+        if self.string_type == 'prefix':
+            if self.string_index >= len(rule.prefixes):
+                self.report({'WARNING'}, "Invalid prefix index!")
+                return {'CANCELLED'}
+            self.original_value = rule.prefixes[self.string_index].value
+        elif self.string_type == 'exact':
+            if self.string_index >= len(rule.exact_matches):
+                self.report({'WARNING'}, "Invalid exact match index!")
+                return {'CANCELLED'}
+            self.original_value = rule.exact_matches[self.string_index].value
+
+        props.editing_string_key = f"{self.rule_index}_{self.string_type}_{self.string_index}"
+
+        wm = context.window_manager
+        self._timer = wm.event_timer_add(0.05, window=context.window)
+        wm.modal_handler_add(self)
+
+        for area in context.screen.areas:
+            area.tag_redraw()
+
+        return {'RUNNING_MODAL'}
+
+class AMAZING_RIGGING_PT_split_bones_rules(Panel):
+    bl_label = "Split Bones Rules"
+    bl_idname = "DATA_PT_amazing_rigging_split_bones_rules"
+    bl_space_type = 'PROPERTIES'
+    bl_region_type = 'WINDOW'
+    bl_context = "data"
+    bl_order = 0  # Ensure this panel appears first
+
+    @classmethod
+    def poll(cls, context):
+        return context.active_object and context.active_object.type == 'ARMATURE'
+
+    def draw(self, context):
+        layout = self.layout
+        arm_data = context.armature
+
+        # Debug: Check if arm_data and amazing_split_rules exist
+        if not arm_data:
+            layout.label(text="No armature data!", icon='ERROR')
+            return
+
+        if not hasattr(arm_data, "amazing_split_rules"):
+            layout.label(text="amazing_split_rules not registered!", icon='ERROR')
+            layout.label(text="Please restart Blender!", icon='ERROR')
+            return
+
+        props = arm_data.amazing_props
+
+        # Auto-initialize default rules if empty (should already be done by handler, but just in case)
+        if len(arm_data.amazing_split_rules) == 0:
+            rule1 = arm_data.amazing_split_rules.add()
+            rule1.name = "Ctrl Bones"
+            rule1.is_hidden = False
+            prefix1 = rule1.prefixes.add()
+            prefix1.value = "DEF-"
+            exact1 = rule1.exact_matches.add()
+            exact1.value = "Root"
+
+            rule2 = arm_data.amazing_split_rules.add()
+            rule2.name = "Other (Deform Bones)"
+            rule2.is_hidden = False
+            
+            print(f"[DEBUG] Auto-initialized {len(arm_data.amazing_split_rules)} split rules for {arm_data.name}")
+
+        # Debug info
+        row_debug = layout.row()
+        row_debug.label(text=f"Split rules count: {len(arm_data.amazing_split_rules)}", icon='INFO')
+
+        # Draw each rule
+        for rule_idx, rule in enumerate(arm_data.amazing_split_rules):
+            rule_box = layout.box()
+
+            # Rule header
+            row_header = rule_box.row()
+            icon_type = 'TRIA_DOWN' if not rule.is_hidden else 'TRIA_RIGHT'
+
+            # Editable rule name
+            editing_key = f"rule_name_{rule_idx}"
+            is_editing_name = props.editing_split_rule_key == editing_key
+
+            if is_editing_name:
+                row_header.prop(rule, "name", text="")
+            else:
+                toggle_op = row_header.operator("armature.amazing_rigging_toggle_split_rule", text=rule.name, icon=icon_type, emboss=False)
+                toggle_op.rule_index = rule_idx
+
+                # Edit name button
+                edit_name_op = row_header.operator("armature.amazing_rigging_edit_split_rule_name", text="", icon='GREASEPENCIL')
+                edit_name_op.rule_index = rule_idx
+
+            # Move/Delete buttons
+            if not rule.is_hidden:
+                move_row = row_header.row(align=True)
+                move_up = move_row.operator("armature.amazing_rigging_move_split_rule_up", text="", icon='TRIA_UP')
+                move_up.rule_index = rule_idx
+                move_down = move_row.operator("armature.amazing_rigging_move_split_rule_down", text="", icon='TRIA_DOWN')
+                move_down.rule_index = rule_idx
+
+            remove_op = row_header.operator("armature.amazing_rigging_remove_split_rule", text="", icon='X')
+            remove_op.rule_index = rule_idx
+
+            # Rule content (when expanded)
+            if not rule.is_hidden:
+                content_box = rule_box.box()
+
+                # Prefix section
+                content_box.label(text="Prefix:")
+                for prefix_idx, prefix_item in enumerate(rule.prefixes):
+                    prefix_row = content_box.row(align=True)
+
+                    editing_key = f"{rule_idx}_prefix_{prefix_idx}"
+                    is_editing = props.editing_string_key == editing_key
+
+                    if is_editing:
+                        prefix_row.prop(prefix_item, "value", text="")
+                    else:
+                        prefix_row.label(text=prefix_item.value if prefix_item.value else "(empty)")
+                        edit_op = prefix_row.operator("armature.amazing_rigging_edit_string_item", text="", icon='GREASEPENCIL')
+                        edit_op.rule_index = rule_idx
+                        edit_op.string_type = 'prefix'
+                        edit_op.string_index = prefix_idx
+
+                    remove_prefix_op = prefix_row.operator("armature.amazing_rigging_remove_split_prefix", text="", icon='X')
+                    remove_prefix_op.rule_index = rule_idx
+                    remove_prefix_op.prefix_index = prefix_idx
+
+                add_prefix_op = content_box.operator("armature.amazing_rigging_add_split_prefix", text="+ Add Prefix", icon='ADD')
+                add_prefix_op.rule_index = rule_idx
+
+                # Spacer
+                content_box.separator()
+
+                # Exact Match section
+                content_box.label(text="Exact Match:")
+                for exact_idx, exact_item in enumerate(rule.exact_matches):
+                    exact_row = content_box.row(align=True)
+
+                    editing_key = f"{rule_idx}_exact_{exact_idx}"
+                    is_editing = props.editing_string_key == editing_key
+
+                    if is_editing:
+                        exact_row.prop(exact_item, "value", text="")
+                    else:
+                        exact_row.label(text=exact_item.value if exact_item.value else "(empty)")
+                        edit_op = exact_row.operator("armature.amazing_rigging_edit_string_item", text="", icon='GREASEPENCIL')
+                        edit_op.rule_index = rule_idx
+                        edit_op.string_type = 'exact'
+                        edit_op.string_index = exact_idx
+
+                    remove_exact_op = exact_row.operator("armature.amazing_rigging_remove_split_exact", text="", icon='X')
+                    remove_exact_op.rule_index = rule_idx
+                    remove_exact_op.exact_index = exact_idx
+
+                add_exact_op = content_box.operator("armature.amazing_rigging_add_split_exact", text="+ Add Exact Match", icon='ADD')
+                add_exact_op.rule_index = rule_idx
+
+        # Add new rule button
+        layout.operator("armature.amazing_rigging_add_split_rule", text="+ Add Split Rule", icon='ADD')
+
+        # Separator
+        layout.separator()
+
+        # Init Amazing Rigging UI button
+        layout.operator("armature.amazing_rigging_init", text="Init Amazing Rigging UI", icon='FILE_REFRESH')
+
 class AMAZING_RIGGING_PT_layer_editor(Panel):
     bl_label = "Ctrl bones UI - Amazing Rigging"
     bl_idname = "DATA_PT_amazing_rigging_ui_settings"
@@ -1104,9 +1635,111 @@ class AMAZING_RIGGING_PT_layer_editor(Panel):
     def poll(cls, context):
         return context.active_object and context.active_object.type == 'ARMATURE'
 
+    def draw_split_bones_rules(self, layout, arm_data):
+        """Draw Split Bones Rules section"""
+        props = arm_data.amazing_props
+
+        # Header
+        box = layout.box()
+        box.label(text="Split Bones Rules", icon='SETTINGS')
+
+        # Initialize default rules if empty
+        if len(arm_data.amazing_split_rules) == 0:
+            rule1 = arm_data.amazing_split_rules.add()
+            rule1.name = "Ctrl Bones"
+            rule1.is_hidden = False
+            prefix1 = rule1.prefixes.add()
+            prefix1.value = "DEF-"
+            exact1 = rule1.exact_matches.add()
+            exact1.value = "Root"
+
+            rule2 = arm_data.amazing_split_rules.add()
+            rule2.name = "Other (Deform Bones)"
+            rule2.is_hidden = False
+
+        # Draw each rule
+        for rule_idx, rule in enumerate(arm_data.amazing_split_rules):
+            rule_box = box.box()
+
+            # Rule header
+            row_header = rule_box.row()
+            icon_type = 'TRIA_DOWN' if not rule.is_hidden else 'TRIA_RIGHT'
+
+            toggle_op = row_header.operator("armature.amazing_rigging_toggle_split_rule", text=rule.name, icon=icon_type, emboss=False)
+            toggle_op.rule_index = rule_idx
+
+            # Edit/Move/Delete buttons
+            if not rule.is_hidden:
+                move_row = row_header.row(align=True)
+                move_up = move_row.operator("armature.amazing_rigging_move_split_rule_up", text="", icon='TRIA_UP')
+                move_up.rule_index = rule_idx
+                move_down = move_row.operator("armature.amazing_rigging_move_split_rule_down", text="", icon='TRIA_DOWN')
+                move_down.rule_index = rule_idx
+
+            remove_op = row_header.operator("armature.amazing_rigging_remove_split_rule", text="", icon='X')
+            remove_op.rule_index = rule_idx
+
+            # Rule content (when expanded)
+            if not rule.is_hidden:
+                content_box = rule_box.box()
+
+                # Prefix section
+                content_box.label(text="Prefix:")
+                for prefix_idx, prefix_item in enumerate(rule.prefixes):
+                    prefix_row = content_box.row(align=True)
+
+                    editing_key = f"{rule_idx}_prefix_{prefix_idx}"
+                    is_editing = props.editing_string_key == editing_key
+
+                    if is_editing:
+                        prefix_row.prop(prefix_item, "value", text="")
+                    else:
+                        prefix_row.label(text=prefix_item.value if prefix_item.value else "(empty)")
+                        edit_op = prefix_row.operator("armature.amazing_rigging_edit_string_item", text="", icon='GREASEPENCIL')
+                        edit_op.rule_index = rule_idx
+                        edit_op.string_type = 'prefix'
+                        edit_op.string_index = prefix_idx
+
+                    remove_prefix_op = prefix_row.operator("armature.amazing_rigging_remove_split_prefix", text="", icon='X')
+                    remove_prefix_op.rule_index = rule_idx
+                    remove_prefix_op.prefix_index = prefix_idx
+
+                add_prefix_op = content_box.operator("armature.amazing_rigging_add_split_prefix", text="+ Add Prefix", icon='ADD')
+                add_prefix_op.rule_index = rule_idx
+
+                # Spacer
+                content_box.separator()
+
+                # Exact Match section
+                content_box.label(text="Exact Match:")
+                for exact_idx, exact_item in enumerate(rule.exact_matches):
+                    exact_row = content_box.row(align=True)
+
+                    editing_key = f"{rule_idx}_exact_{exact_idx}"
+                    is_editing = props.editing_string_key == editing_key
+
+                    if is_editing:
+                        exact_row.prop(exact_item, "value", text="")
+                    else:
+                        exact_row.label(text=exact_item.value if exact_item.value else "(empty)")
+                        edit_op = exact_row.operator("armature.amazing_rigging_edit_string_item", text="", icon='GREASEPENCIL')
+                        edit_op.rule_index = rule_idx
+                        edit_op.string_type = 'exact'
+                        edit_op.string_index = exact_idx
+
+                    remove_exact_op = exact_row.operator("armature.amazing_rigging_remove_split_exact", text="", icon='X')
+                    remove_exact_op.rule_index = rule_idx
+                    remove_exact_op.exact_index = exact_idx
+
+                add_exact_op = content_box.operator("armature.amazing_rigging_add_split_exact", text="+ Add Exact Match", icon='ADD')
+                add_exact_op.rule_index = rule_idx
+
+        # Add new rule button
+        box.operator("armature.amazing_rigging_add_split_rule", text="+ Add Split Rule", icon='ADD')
+
     def draw(self, context):
         layout = self.layout
-        arm_data =context.armature
+        arm_data = context.armature
 
         layout.operator("armature.amazing_rigging_init", icon='FILE_REFRESH')
         layout.separator()
@@ -1280,6 +1913,8 @@ class AMAZING_RIGGING_PT_layer_editor(Panel):
             layout.label(text="Please initialize data first", icon='INFO')
 
 classes = [
+    AMAZING_RIGGING_StringItem,
+    AMAZING_RIGGING_SplitRule,
     AMAZING_RIGGING_CollectionItem,
     AMAZING_RIGGING_Bone_Pocket,
     AMAZING_RIGGING_ArmatureProperties,
@@ -1300,5 +1935,18 @@ classes = [
     AMAZING_RIGGING_OT_edit_bone_pocket,
     AMAZING_RIGGING_OT_remove_from_grid,
     AMAZING_RIGGING_OT_toggle_bone_pocket,
+    AMAZING_RIGGING_OT_init_split_rules,
+    AMAZING_RIGGING_OT_add_split_rule,
+    AMAZING_RIGGING_OT_remove_split_rule,
+    AMAZING_RIGGING_OT_toggle_split_rule,
+    AMAZING_RIGGING_OT_move_split_rule_up,
+    AMAZING_RIGGING_OT_move_split_rule_down,
+    AMAZING_RIGGING_OT_add_split_prefix,
+    AMAZING_RIGGING_OT_remove_split_prefix,
+    AMAZING_RIGGING_OT_add_split_exact,
+    AMAZING_RIGGING_OT_remove_split_exact,
+    AMAZING_RIGGING_OT_edit_split_rule_name,
+    AMAZING_RIGGING_OT_edit_string_item,
+    AMAZING_RIGGING_PT_split_bones_rules,
     AMAZING_RIGGING_PT_layer_editor,
 ]
