@@ -2,6 +2,7 @@ import bpy
 from bpy.types import Panel, Operator
 from bpy.props import StringProperty, IntProperty
 from datetime import datetime
+from . import utils_bone_data
 
 _last_pose_armature = None
 
@@ -228,6 +229,11 @@ class AMAZING_RIGGING_PT_main_sidebar(Panel):
         row_scripts_2.operator("armature.collection_show_all", text="Export to UE", icon='EXPORT')
 
         layout.separator()
+        
+        # === Custom Properties (新增) ===
+        self._draw_custom_properties(layout, context, target_armature)
+        
+        layout.separator()
 
         layout.label(text="Bone Collections", icon='GROUP_BONE')
         row_ctrl = layout.row()
@@ -395,6 +401,69 @@ class AMAZING_RIGGING_PT_main_sidebar(Panel):
                                     row_flow.prop(b_col, "is_visible", text=item.note, toggle=True)
                                 else:
                                     row_flow.label(text=item.note)
+    
+    def _draw_custom_properties(self, layout, context, armature):
+        """绘制 Custom Properties 面板 - 过滤内部属性"""
+        if not armature:
+            return
+        
+        obj = context.active_object
+        if not obj or obj.type != 'ARMATURE':
+            return
+        
+        arm_data = armature.data
+        
+        # 获取选中的 bone
+        if obj.mode == 'POSE':
+            selected_bone_names = [pb.name for pb in context.selected_pose_bones]
+        elif obj.mode == 'EDIT':
+            selected_bone_names = [eb.name for eb in context.selected_editable_bones]
+        else:
+            selected_bone_names = []
+        
+        if not selected_bone_names:
+            return
+        
+        # 获取 bone 对象
+        bone_name = selected_bone_names[0]
+        bone_data = arm_data.bones.get(bone_name)
+        
+        if not bone_data:
+            return
+        
+        # 过滤内部属性
+        INTERNAL_KEYS = {
+            'amazing_settings_bone',
+            'amazing_settings_armature',
+            'amazing_settings_armature_uuid',
+            '_RNA_UI'
+        }
+        
+        # 获取所有自定义属性（排除内部属性）
+        prop_keys = [k for k in bone_data.keys() if k not in INTERNAL_KEYS]
+        
+        if not prop_keys:
+            return
+        
+        # 显示 Custom Properties
+        box = layout.box()
+        box.label(text="Custom Properties", icon='PROPERTIES')
+        
+        # 读取属性 UI 配置
+        custom_props = bone_data.get("_RNA_UI", {})
+        
+        for key in prop_keys:
+            value = bone_data[key]
+            row = box.row()
+            prop_ui = custom_props.get(key, {})
+            display_name = prop_ui.get('name', key)
+            
+            if isinstance(value, (int, float)):
+                row.prop(bone_data, f'["{key}"]', text=display_name)
+            elif isinstance(value, str):
+                row.label(text=f"{display_name}: {value}")
+            else:
+                row.label(text=f"{display_name}: {str(value)}")
 
 classes = [
     AMAZING_RIGGING_OT_toggle_ui_panel_rule,

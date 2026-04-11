@@ -11,14 +11,23 @@ bl_info = {
 # 导入子模块
 from bpy.app.handlers import persistent
 import bpy
+import uuid
 from . import ui_panel
 from . import ui_layer_editor
 from . import op_scripts
+from . import ui_bone_properties
+from . import utils_bone_data
 
 _msgbus_owner = object()
 
 # 存储已知的 collection 名称，用于检测变化
 _collection_name_cache = {}
+
+# 存储每个 armature 的骨骼名称集合，用于检测骨骼删除
+_bone_names_cache = {}  # {armature_name: {bone_name1, bone_name2, ...}}
+
+# 骨骼删除处理标志，避免重复执行
+_processing_bone_deletion = False
 
 # 定时器状态管理
 _timer_active = False
@@ -228,24 +237,115 @@ def on_collection_rename_for_armature(old_names, new_names, obj):
         _processing_collection_change = False
 
 
+def check_bone_deletions():
+    """检测骨骼删除并清理从属骨骼引用"""
+    global _bone_names_cache, _processing_bone_deletion
+    
+    # 避免重复执行
+    if _processing_bone_deletion:
+        return
+    
+    try:
+        deletion_detected = False
+        
+        for arm_data in bpy.data.armatures:
+            arm_name = arm_data.name
+            
+            # 获取当前骨骼名称集合
+            current_bone_names = {bone.name for bone in arm_data.bones}
+            
+            # 初始化缓存
+            if arm_name not in _bone_names_cache:
+                _bone_names_cache[arm_name] = current_bone_names
+                continue
+            
+            cached_bone_names = _bone_names_cache[arm_name]
+            
+            # 检测删除的骨骼
+            deleted_bones = cached_bone_names - current_bone_names
+            
+            if deleted_bones:
+                deletion_detected = True
+                print(f"[DEBUG] 检测到骨骼删除: {arm_name} -> {deleted_bones}")
+                
+                # 更新缓存
+                _bone_names_cache[arm_name] = current_bone_names
+        
+        # 如果检测到删除，执行清理
+        if deletion_detected:
+            _processing_bone_deletion = True
+            try:
+                cleanup_invalid_references()
+            finally:
+                _processing_bone_deletion = False
+    
+    except Exception as e:
+        print(f"[ERROR] check_bone_deletions 异常: {e}")
+        import traceback
+        traceback.print_exc()
+        _processing_bone_deletion = False
+
+
+def cleanup_invalid_references():
+    """清理所有无效的 settings bone 引用"""
+    from . import utils_bone_data
+    
+    try:
+        cleaned_count = 0
+        
+        for arm_data in bpy.data.armatures:
+            for bone in arm_data.bones:
+                settings_info = utils_bone_data.get_settings_bone_info(bone)
+                
+                if not settings_info:
+                    continue
+                
+                # 验证 settings bone 是否仍然存在
+                settings_bone = utils_bone_data.get_settings_bone_object(bone)
+                
+                if settings_bone is None:
+                    # settings bone 已不存在，清除引用
+                    print(f"[DEBUG] 清理无效引用: {arm_data.name}/{bone.name} -> {settings_info['armature_name']}/{settings_info['bone_name']} (已删除)")
+                    utils_bone_data.clear_settings_bone(bone)
+                    cleaned_count += 1
+        
+        if cleaned_count > 0:
+            print(f"[DEBUG] 共清理了 {cleaned_count} 个无效的 settings bone 引用")
+            # 触发 UI 刷新
+            for area in bpy.context.screen.areas:
+                area.tag_redraw()
+    
+    except Exception as e:
+        print(f"[ERROR] cleanup_invalid_references 异常: {e}")
+        import traceback
+        traceback.print_exc()
+
+
 @persistent
 def depsgraph_update_handler(scene):
     """检测 Bone Collection 重命名或删除，以及选择变化"""
-    # 检查是否选中了 armature，如果是且定时器未运行，则启动轮询
     try:
         obj = bpy.context.object
 
         on_selection_change()
+        
+        # 同步骨骼选择到 UI 状态
+        if obj and obj.type == 'ARMATURE':
+            try:
+                from . import ui_bone_properties
+                ui_bone_properties.sync_ui_to_selected_bone(scene)
+            except Exception as e:
+                print(f"[ERROR] sync_ui_to_selected_bone 异常: {e}")
+                import traceback
+                traceback.print_exc()
+        
+        # 检测骨骼删除并清理无效引用
+        check_bone_deletions()
 
         if obj and obj.type == 'ARMATURE' and not _timer_active:
-            print(f"[DEBUG] depsgraph: 检测到选中 armature '{obj.name}'，重启轮询")
             ensure_timer_running()
     except Exception as e:
         print(f"[ERROR] depsgraph_update_handler 异常: {e}")
-    
-    # 如果定时器正在运行，检查 collection 变化
-    # if _timer_active:
-    #     check_collection_changes()
 
 
 def check_collection_changes():
@@ -357,6 +457,10 @@ def on_load_post(dummy):
     _timer_active = False
     _poll_count = 0
     _processing_collection_change = False
+    
+    # 重置 ui_bone_properties 的全局状态
+    ui_bone_properties.reset_state()
+    
     print("[DEBUG] 已清空缓存并重置定时器状态")
     
     # 重新请求启动定时器（会在 initialize_all_caches 中实际注册）
@@ -465,6 +569,7 @@ classes = [
     *ui_panel.classes,
     *ui_layer_editor.classes,
     *op_scripts.classes,
+    *ui_bone_properties.classes,
 ]
 
 
@@ -483,7 +588,28 @@ def register():
     bpy.types.Armature.amazing_props = bpy.props.PointerProperty(type=ui_layer_editor.AMAZING_RIGGING_ArmatureProperties)
     bpy.types.Armature.amazing_bone_pockets = bpy.props.CollectionProperty(type=ui_layer_editor.AMAZING_RIGGING_Bone_Pocket)
     bpy.types.Armature.amazing_split_rules = bpy.props.CollectionProperty(type=ui_layer_editor.AMAZING_RIGGING_SplitRule)
+    
+    # 为 Armature 添加 UUID 属性（用于唯一标识）
+    bpy.types.Armature.uuid = bpy.props.StringProperty(name="UUID", default="")
     print("属性注册完成")
+    
+    # 注册 ui_bone_properties 的 Scene 属性
+    ui_bone_properties.register()
+    
+    # 延迟初始化 UUID（在 Blender 完全加载后执行）
+    def initialize_uuids():
+        """延迟初始化所有 armature 的 UUID"""
+        try:
+            for armature in bpy.data.armatures:
+                if not hasattr(armature, 'uuid') or not armature.uuid:
+                    armature.uuid = str(uuid.uuid4())
+            print("[DEBUG] UUID 初始化完成")
+        except Exception as e:
+            print(f"[DEBUG] UUID 初始化失败: {e}")
+        return None
+    
+    # 在 0.5 秒后执行 UUID 初始化
+    bpy.app.timers.register(initialize_uuids, first_interval=0.5)
 
     bpy.app.handlers.depsgraph_update_post.append(depsgraph_update_handler)
     print("[DEBUG] 已注册 depsgraph_update_handler")
@@ -518,6 +644,12 @@ def unregister():
 
     if hasattr(bpy.types.Armature, "amazing_split_rules"):
         del bpy.types.Armature.amazing_split_rules
+    
+    if hasattr(bpy.types.Armature, "uuid"):
+        del bpy.types.Armature.uuid
+    
+    # 注销 ui_bone_properties 的 Scene 属性
+    ui_bone_properties.unregister()
 
     if depsgraph_update_handler in bpy.app.handlers.depsgraph_update_post:
         bpy.app.handlers.depsgraph_update_post.remove(depsgraph_update_handler)
