@@ -171,12 +171,12 @@ def _on_target_bone_changed(self, context):
     if not arm_obj or arm_obj.type != 'ARMATURE':
         return
 
+    ui_state = context.scene.amazing_rigging_ui
+
     # 防止骨骼引用自身作为 settings bone
     if (obj.data == arm_obj.data and obj.name == arm_obj.name and
         bone_name == ui_state.target_bone):
         return
-
-    ui_state = context.scene.amazing_rigging_ui
 
     if ui_state.target_bone:
         target_pb = arm_obj.pose.bones.get(ui_state.target_bone)
