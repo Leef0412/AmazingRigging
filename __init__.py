@@ -543,33 +543,56 @@ def initialize_default_split_rules():
     try:
         for armature in bpy.data.armatures:
             if hasattr(armature, "amazing_split_rules"):
-                # 只有在规则为空时才初始化
-                if len(armature.amazing_split_rules) == 0:
-                    print(f"[DEBUG] 为 {armature.name} 初始化默认 split rules")
-                    
-                    # 创建默认规则 1: Ctrl Bones
-                    rule1 = armature.amazing_split_rules.add()
-                    rule1.name = "Ctrl Bones"
-                    rule1.is_hidden = False
-                    prefix1 = rule1.prefixes.add()
-                    prefix1.value = "DEF-"
-                    exact1 = rule1.exact_matches.add()
-                    exact1.value = "Root"
+                # 检测是否是旧规则模式（Ctrl Bones 或 Other (Deform Bones)）
+                has_old_rules = False
+                for rule in armature.amazing_split_rules:
+                    if rule.name in ("Ctrl Bones", "Other (Deform Bones)"):
+                        has_old_rules = True
+                        break
 
-                    # 自动创建 "Other" 规则（用于收集未匹配的骨骼集合）
-                    rule_other = armature.amazing_split_rules.add()
-                    rule_other.name = "Other"
-                    rule_other.is_hidden = False
-                    
-                    # 迁移逻辑：如果存在旧的 "Other (Deform Bones)" 规则，重命名为 "Other"
-                    for rule in armature.amazing_split_rules:
-                        if rule.name == "Other (Deform Bones)":
-                            rule.name = "Other"
-                            print(f"[DEBUG] 已将旧规则 'Other (Deform Bones)' 重命名为 'Other'")
-                    
-                    print(f"[DEBUG] 已为 {armature.name} 创建 {len(armature.amazing_split_rules)} 个默认规则")
-                else:
-                    print(f"[DEBUG] {armature.name} 已有 {len(armature.amazing_split_rules)} 个 split rules，跳过初始化")
+                # 如果是旧规则模式，清除后重建
+                if has_old_rules:
+                    print(f"[DEBUG] 检测到 {armature.name} 使用旧规则模式，执行迁移")
+                    # 清除所有旧规则
+                    while len(armature.amazing_split_rules) > 0:
+                        armature.amazing_split_rules.remove(0)
+                # 只有在规则为空时才初始化
+                elif len(armature.amazing_split_rules) > 0:
+                    continue
+
+                print(f"[DEBUG] 为 {armature.name} 初始化默认 split rules")
+                
+                # 创建默认规则 1: Controller
+                rule1 = armature.amazing_split_rules.add()
+                rule1.name = "Controller"
+                rule1.is_hidden = False
+                for prefix in ("CTRL-", "FK-", "TWEAK-"):
+                    p = rule1.prefixes.add()
+                    p.value = prefix
+
+                # 创建默认规则 2: Support & MCH
+                rule2 = armature.amazing_split_rules.add()
+                rule2.name = "Support & MCH"
+                rule2.is_hidden = False
+                for prefix in ("IK-", "MCH-", "ORG-", "TGT-", "SWITCH-", "VIS-"):
+                    p = rule2.prefixes.add()
+                    p.value = prefix
+
+                # 创建默认规则 3: Deform
+                rule3 = armature.amazing_split_rules.add()
+                rule3.name = "Deform"
+                rule3.is_hidden = False
+                p = rule3.prefixes.add()
+                p.value = "DEF-"
+                e = rule3.exact_matches.add()
+                e.value = "Root"
+
+                # 自动创建 "Other" 规则（用于收集未匹配的骨骼集合）
+                rule_other = armature.amazing_split_rules.add()
+                rule_other.name = "Other"
+                rule_other.is_hidden = False
+                
+                print(f"[DEBUG] 已为 {armature.name} 创建 {len(armature.amazing_split_rules)} 个默认规则")
             else:
                 print(f"[DEBUG] 跳过 {armature.name}: 缺少 amazing_split_rules 属性")
     except Exception as e:
