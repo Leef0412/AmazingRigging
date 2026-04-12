@@ -22,66 +22,48 @@ def reset_state():
     _syncing_ui = False
 
 
-def _get_bone_for_read(obj, bone_name):
-    """获取用于读取自定义属性的 bone 对象。
-    在 Edit Mode 下，EditBone 拥有最新的自定义属性（arm_data.bones 是过时快照）。
-    在其他模式下，使用 arm_data.bones。
-    """
-    if not obj or obj.type != 'ARMATURE' or not bone_name:
+def get_active_bone_name(context, obj):
+    """获取当前活跃骨骼名称（仅 Pose Mode）"""
+    if not obj or obj.type != 'ARMATURE':
         return None
-    arm_data = obj.data
-    if obj.mode == 'EDIT':
-        eb = arm_data.edit_bones.get(bone_name)
-        if eb:
-            return eb
-    return arm_data.bones.get(bone_name)
-
-
-def _get_writable_bone(obj, bone_name):
-    """获取用于写入自定义属性的 bone 对象。
-    在 Edit Mode 下，必须写入 EditBone（Blender 退出 Edit Mode 时同步到 Bone）。
-    在其他模式下，写入 arm_data.bones。
-    """
-    if not obj or obj.type != 'ARMATURE' or not bone_name:
+    if obj.mode != 'POSE':
         return None
-    arm_data = obj.data
-    if obj.mode == 'EDIT':
-        return arm_data.edit_bones.get(bone_name)
-    return arm_data.bones.get(bone_name)
+
+    active_pb = getattr(context, 'active_pose_bone', None)
+    if active_pb:
+        return active_pb.name
+
+    bone = getattr(context, 'bone', None)
+    if bone:
+        return bone.name
+
+    selected_pbs = getattr(context, 'selected_pose_bones', [])
+    if selected_pbs:
+        return selected_pbs[0].name
+
+    return None
 
 
-def _get_target_bone_for_write(arm_obj, bone_name):
-    """获取目标 armature 上用于写入反向引用的 bone 对象。
-    在 Edit Mode 下，如果目标 armature 也处于 Edit Mode，需要写入 EditBone。
-    """
-    if not arm_obj or arm_obj.type != 'ARMATURE' or not bone_name:
+def _get_target_pb_from_info(settings_info):
+    """从 settings_info 获取主导 PoseBone 对象"""
+    if not settings_info:
         return None
-    arm_data = arm_obj.data
-    if arm_obj.mode == 'EDIT':
-        eb = arm_data.edit_bones.get(bone_name)
-        if eb:
-            return eb
-    return arm_data.bones.get(bone_name)
-
-
-def _target_bone_exists(arm_obj, bone_name):
-    """检查目标 armature 上是否存在指定名称的骨骼。
-    在 Edit Mode 下同时检查 edit_bones（新创建的骨骼可能不在 bones 快照中）。
-    """
-    if not arm_obj or arm_obj.type != 'ARMATURE' or not bone_name:
-        return False
-    arm_data = arm_obj.data
-    if arm_data.bones.get(bone_name):
-        return True
-    # Edit Mode 下额外检查 edit_bones
-    if arm_obj.mode == 'EDIT' and arm_data.edit_bones.get(bone_name):
-        return True
-    return False
+    arm_obj = utils_bone_data.find_armature_obj_by_uuid(settings_info['armature_uuid'])
+    if not arm_obj:
+        arm_data = bpy.data.armatures.get(settings_info['armature_name'])
+        if arm_data:
+            for obj in bpy.data.objects:
+                if obj.type == 'ARMATURE' and obj.data == arm_data:
+                    arm_obj = obj
+                    break
+    if arm_obj:
+        return arm_obj.pose.bones.get(settings_info['bone_name'])
+    return None
 
 
 def sync_ui_to_selected_bone(scene):
     """Sync ui_state to the currently selected bone's settings.
-    
+
     只在 bone 切换时同步 UI，避免覆盖用户的编辑操作。
     使用 _syncing_ui 标志防止回调在同步过程中修改 bone 数据。
     """
@@ -91,69 +73,44 @@ def sync_ui_to_selected_bone(scene):
         obj = context.active_object
     except Exception:
         return
-    
-    if not obj or obj.type != 'ARMATURE':
+
+    if not obj or obj.type != 'ARMATURE' or obj.mode != 'POSE':
         return
-    
+
     arm_data = obj.data
     ui_state = scene.amazing_rigging_ui
-    
-    bone_name = None
-    if obj.mode == 'POSE':
-        active_pose_bone = getattr(context, 'active_pose_bone', None)
-        selected_pose_bones = getattr(context, 'selected_pose_bones', [])
-        
-        if active_pose_bone:
-            bone_name = active_pose_bone.name
-        elif selected_pose_bones:
-            bone_name = selected_pose_bones[0].name
-    elif obj.mode == 'EDIT':
-        edit_bone = getattr(context, 'edit_bone', None)
-        selected_editable_bones = getattr(context, 'selected_editable_bones', [])
-        
-        if edit_bone:
-            bone_name = edit_bone.name
-        elif selected_editable_bones:
-            bone_name = selected_editable_bones[0].name
-        else:
-            for eb in arm_data.edit_bones:
-                if eb.select:
-                    bone_name = eb.name
-                    break
-    else:
-        return
-    
-    # 关键：检查 bone 是否真的切换了
+
+    bone_name = get_active_bone_name(context, obj)
+
     global _last_synced_bone, _syncing_ui
     current_bone_key = (arm_data.name, bone_name) if bone_name else None
-    
+
     if current_bone_key == _last_synced_bone:
-        return  # 同一个 bone，跳过同步
-    
+        return
+
     _last_synced_bone = current_bone_key
-    
-    # 使用 _syncing_ui 标志防止回调在设置 UI 时修改 bone 数据
+
     _syncing_ui = True
     try:
         if not bone_name:
             ui_state.target_armature = None
             ui_state.target_bone = ""
             return
-        
-        # 在 Edit Mode 下，从 EditBone 读取最新的自定义属性
-        bone_data = _get_bone_for_read(obj, bone_name)
-        if not bone_data:
+
+        pose_bone = obj.pose.bones.get(bone_name)
+        if not pose_bone:
             return
-        
-        settings_info = utils_bone_data.get_settings_bone_info(bone_data)
-        
+
+        settings_info = utils_bone_data.get_settings_bone_info(pose_bone)
+
         if settings_info:
-            target_arm_obj = None
-            for scene_obj in scene.objects:
-                if scene_obj.type == 'ARMATURE' and scene_obj.data.name == settings_info['armature_name']:
-                    target_arm_obj = scene_obj
-                    break
-            
+            target_arm_obj = utils_bone_data.find_armature_obj_by_uuid(settings_info['armature_uuid'])
+            if not target_arm_obj:
+                for scene_obj in scene.objects:
+                    if scene_obj.type == 'ARMATURE' and scene_obj.data.name == settings_info['armature_name']:
+                        target_arm_obj = scene_obj
+                        break
+
             ui_state.target_armature = target_arm_obj
             ui_state.target_bone = settings_info['bone_name']
         else:
@@ -166,27 +123,24 @@ def sync_ui_to_selected_bone(scene):
 # ── Scene Properties for UI state ──
 
 def _on_target_armature_changed(self, context):
-    """When target armature changes, clear the bone selection (but NOT the existing settings)"""
+    """When target armature changes, clear the bone selection"""
     global _syncing_ui, _skip_bone_changed_callback
-    
-    # 如果 sync_ui 正在更新 UI，跳过回调（防止级联修改 bone 数据）
+
     if _syncing_ui:
         return
-    
+
     obj = context.active_object
     if not obj or obj.type != 'ARMATURE':
         return
 
     ui_state = context.scene.amazing_rigging_ui
-    
-    # 选择 target armature 时，只清空 UI 中的 target_bone 字段
-    # 不触发 _on_target_bone_changed 回调（避免错误清空 bone 数据）
+
     _skip_bone_changed_callback = True
     try:
         ui_state.target_bone = ""
     finally:
         _skip_bone_changed_callback = False
-    
+
     for area in context.screen.areas:
         area.tag_redraw()
 
@@ -194,90 +148,58 @@ def _on_target_armature_changed(self, context):
 def _on_target_bone_changed(self, context):
     """When target bone changes, apply or clear the setting"""
     global _skip_bone_changed_callback, _syncing_ui
-    
-    # 如果 sync_ui 正在更新 UI，跳过回调（防止级联修改 bone 数据）
+
     if _syncing_ui:
         return
-    
-    # 如果是 armature 切换导致的清空，不执行任何操作
+
     if _skip_bone_changed_callback:
         return
-    
+
     obj = context.active_object
-    if not obj or obj.type != 'ARMATURE':
+    if not obj or obj.type != 'ARMATURE' or obj.mode != 'POSE':
         return
 
-    arm_data = obj.data
-    ui_state = context.scene.amazing_rigging_ui
-
-    # Get selected bone name
-    if obj.mode == 'POSE':
-        selected = [pb.name for pb in context.selected_pose_bones]
-    elif obj.mode == 'EDIT':
-        selected = [eb.name for eb in context.selected_editable_bones]
-    else:
+    bone_name = get_active_bone_name(context, obj)
+    if not bone_name:
         return
 
-    if not selected:
+    pose_bone = obj.pose.bones.get(bone_name)
+    if not pose_bone:
         return
-    
-    bone_name = selected[0]
-    
-    # Get writable bone object based on mode
-    writable_bone = _get_writable_bone(obj, bone_name)
-    if not writable_bone:
-        return
-    
-    # 在 Edit Mode 下从 EditBone 读取最新自定义属性
-    bone_for_read = _get_bone_for_read(obj, bone_name)
-    
-    arm_obj = ui_state.target_armature
+
+    arm_obj = context.scene.amazing_rigging_ui.target_armature
     if not arm_obj or arm_obj.type != 'ARMATURE':
         return
 
-    # If bone is selected, apply; if empty, clear
+    # 防止骨骼引用自身作为 settings bone
+    if (obj.data == arm_obj.data and obj.name == arm_obj.name and
+        bone_name == ui_state.target_bone):
+        return
+
+    ui_state = context.scene.amazing_rigging_ui
+
     if ui_state.target_bone:
-        # 在 Edit Mode 下同时检查 edit_bones（新创建的骨骼可能不在 bones 快照中）
-        if _target_bone_exists(arm_obj, ui_state.target_bone):
-            # 获取目标骨骼的可写对象（用于写入反向引用）
-            target_bone_for_write = _get_target_bone_for_write(arm_obj, ui_state.target_bone)
-            
-            # Get current settings info before setting new one
-            current_info = utils_bone_data.get_settings_bone_info(bone_for_read) if bone_for_read else None
+        target_pb = arm_obj.pose.bones.get(ui_state.target_bone)
+        if target_pb:
+            current_info = utils_bone_data.get_settings_bone_info(pose_bone)
             if current_info:
-                # 获取当前关联的主导骨骼的可写对象
-                current_target_for_write = None
-                current_arm_obj = None
-                for scene_obj in context.scene.objects:
-                    if scene_obj.type == 'ARMATURE' and scene_obj.data.name == current_info['armature_name']:
-                        current_arm_obj = scene_obj
-                        break
-                if current_arm_obj:
-                    current_target_for_write = _get_target_bone_for_write(current_arm_obj, current_info['bone_name'])
-                utils_bone_data.clear_settings_bone(writable_bone, target_bone_info=current_info, target_bone_for_write=current_target_for_write)
-            
+                current_target_pb = _get_target_pb_from_info(current_info)
+                utils_bone_data.clear_settings_bone(pose_bone, target_bone_info=current_info, target_pose_bone=current_target_pb)
+
             utils_bone_data.set_settings_bone(
-                writable_bone,
-                ui_state.target_bone,
-                arm_obj.data,
-                source_arm_data=obj.data,
-                source_bone=writable_bone,
-                target_bone_for_write=target_bone_for_write
+                pose_bone, ui_state.target_bone, arm_obj,
+                source_arm_obj=obj, source_pose_bone=pose_bone,
+                target_pose_bone=target_pb
             )
             for area in context.screen.areas:
                 area.tag_redraw()
     else:
-        settings_info = utils_bone_data.get_settings_bone_info(bone_for_read) if bone_for_read else None
-        # 获取主导骨骼的可写对象
-        target_bone_for_write = None
+        settings_info = utils_bone_data.get_settings_bone_info(pose_bone)
         if settings_info:
-            for scene_obj in context.scene.objects:
-                if scene_obj.type == 'ARMATURE' and scene_obj.data.name == settings_info['armature_name']:
-                    target_bone_for_write = _get_target_bone_for_write(scene_obj, settings_info['bone_name'])
-                    break
-        utils_bone_data.clear_settings_bone(writable_bone, target_bone_info=settings_info, target_bone_for_write=target_bone_for_write)
-        for area in context.screen.areas:
-            area.tag_redraw()
+            target_pb = _get_target_pb_from_info(settings_info)
+            utils_bone_data.clear_settings_bone(pose_bone, target_bone_info=settings_info, target_pose_bone=target_pb)
+            for area in context.screen.areas:
+                area.tag_redraw()
 
 
 class AMAZING_RIGGING_PG_settings_bone_ui(PropertyGroup):
@@ -297,10 +219,10 @@ class AMAZING_RIGGING_PG_settings_bone_ui(PropertyGroup):
     )
 
 
-# ── Bone Selection Menu (mimics constraint bone dropdown) ──
+# ── Bone Selection Menu ──
 
 class AMAZING_RIGGING_MT_bone_selection(Menu):
-    """Bone selection popup menu - appears when clicking dropdown arrow"""
+    """Bone selection popup menu"""
     bl_label = "Select Bone"
     bl_idname = "AMAZING_RIGGING_MT_bone_selection"
 
@@ -313,21 +235,8 @@ class AMAZING_RIGGING_MT_bone_selection(Menu):
             layout.label(text="No target armature selected", icon='INFO')
             return
 
-        # Get current selected bone to exclude
-        obj = context.active_object
-        exclude_bone = None
-        if obj and obj.type == 'ARMATURE':
-            if obj.mode == 'POSE':
-                selected = [pb.name for pb in context.selected_pose_bones]
-            elif obj.mode == 'EDIT':
-                selected = [eb.name for eb in context.selected_editable_bones]
-            else:
-                selected = []
-            exclude_bone = selected[0] if selected else None
-
+        # 显示 target armature 的所有骨骼，不排除任何 bone
         for bone in arm_obj.data.bones:
-            if exclude_bone and bone.name == exclude_bone:
-                continue
             op = layout.operator("amazing_rigging.select_bone", text=bone.name, icon='BONE_DATA')
             op.bone_name = bone.name
 
@@ -345,18 +254,6 @@ class AMAZING_RIGGING_OT_select_bone(Operator):
         return {'FINISHED'}
 
 
-# ── Helper for clear operators ──
-
-def _get_target_bone_for_write_from_info(context, settings_info):
-    """从 settings_info 获取主导骨骼的可写对象"""
-    if not settings_info:
-        return None
-    for scene_obj in context.scene.objects:
-        if scene_obj.type == 'ARMATURE' and scene_obj.data.name == settings_info['armature_name']:
-            return _get_target_bone_for_write(scene_obj, settings_info['bone_name'])
-    return None
-
-
 # ── Clear Operators ──
 
 class AMAZING_RIGGING_OT_clear_target(Operator):
@@ -368,36 +265,20 @@ class AMAZING_RIGGING_OT_clear_target(Operator):
 
     def execute(self, context):
         obj = context.active_object
-        if not obj or obj.type != 'ARMATURE':
-            self.report({'ERROR'}, "Please select an armature object")
+        if not obj or obj.type != 'ARMATURE' or obj.mode != 'POSE':
+            self.report({'ERROR'}, "Please select an armature in Pose Mode")
             return {'CANCELLED'}
 
-        arm_data = obj.data
-
-        # Get selected bone name
-        if obj.mode == 'POSE':
-            selected = [pb.name for pb in context.selected_pose_bones]
-        elif obj.mode == 'EDIT':
-            selected = [eb.name for eb in context.selected_editable_bones]
-        else:
-            self.report({'ERROR'}, "Must be in Edit or Pose mode")
+        bone_name = get_active_bone_name(context, obj)
+        if not bone_name:
             return {'CANCELLED'}
-        
-        if not selected:
-            return {'CANCELLED'}
-        
-        bone_name = selected[0]
-        
-        # Get writable bone based on mode
-        writable_bone = _get_writable_bone(obj, bone_name)
-        bone_for_read = _get_bone_for_read(obj, bone_name)
 
-        if writable_bone:
-            settings_info = utils_bone_data.get_settings_bone_info(bone_for_read) if bone_for_read else None
-            target_bone_for_write = _get_target_bone_for_write_from_info(context, settings_info)
-            utils_bone_data.clear_settings_bone(writable_bone, target_bone_info=settings_info, target_bone_for_write=target_bone_for_write)
+        pose_bone = obj.pose.bones.get(bone_name)
+        if pose_bone:
+            settings_info = utils_bone_data.get_settings_bone_info(pose_bone)
+            target_pb = _get_target_pb_from_info(settings_info)
+            utils_bone_data.clear_settings_bone(pose_bone, target_bone_info=settings_info, target_pose_bone=target_pb)
 
-        # Clear UI state（使用 _syncing_ui 防止回调冗余修改数据）
         global _syncing_ui
         _syncing_ui = True
         try:
@@ -422,36 +303,20 @@ class AMAZING_RIGGING_OT_clear_bone(Operator):
 
     def execute(self, context):
         obj = context.active_object
-        if not obj or obj.type != 'ARMATURE':
-            self.report({'ERROR'}, "Please select an armature object")
+        if not obj or obj.type != 'ARMATURE' or obj.mode != 'POSE':
+            self.report({'ERROR'}, "Please select an armature in Pose Mode")
             return {'CANCELLED'}
 
-        arm_data = obj.data
-
-        # Get selected bone name
-        if obj.mode == 'POSE':
-            selected = [pb.name for pb in context.selected_pose_bones]
-        elif obj.mode == 'EDIT':
-            selected = [eb.name for eb in context.selected_editable_bones]
-        else:
-            self.report({'ERROR'}, "Must be in Edit or Pose mode")
+        bone_name = get_active_bone_name(context, obj)
+        if not bone_name:
             return {'CANCELLED'}
 
-        if not selected:
-            return {'CANCELLED'}
-        
-        bone_name = selected[0]
-        
-        # Get writable bone based on mode
-        writable_bone = _get_writable_bone(obj, bone_name)
-        bone_for_read = _get_bone_for_read(obj, bone_name)
+        pose_bone = obj.pose.bones.get(bone_name)
+        if pose_bone:
+            settings_info = utils_bone_data.get_settings_bone_info(pose_bone)
+            target_pb = _get_target_pb_from_info(settings_info)
+            utils_bone_data.clear_settings_bone(pose_bone, target_bone_info=settings_info, target_pose_bone=target_pb)
 
-        if writable_bone:
-            settings_info = utils_bone_data.get_settings_bone_info(bone_for_read) if bone_for_read else None
-            target_bone_for_write = _get_target_bone_for_write_from_info(context, settings_info)
-            utils_bone_data.clear_settings_bone(writable_bone, target_bone_info=settings_info, target_bone_for_write=target_bone_for_write)
-
-        # Clear UI state（使用 _syncing_ui 防止回调冗余修改数据）
         global _syncing_ui
         _syncing_ui = True
         try:
@@ -475,77 +340,50 @@ class AMAZING_RIGGING_OT_select_related_bone(Operator):
 
     def execute(self, context):
         obj = context.active_object
-        if not obj or obj.type != 'ARMATURE':
-            self.report({'ERROR'}, "Please select an armature object")
+        if not obj or obj.type != 'ARMATURE' or obj.mode != 'POSE':
+            self.report({'ERROR'}, "Please select an armature in Pose Mode")
             return {'CANCELLED'}
 
-        arm_data = obj.data
-
-        # Get selected bone name
-        if obj.mode == 'POSE':
-            selected = [pb.name for pb in context.selected_pose_bones]
-        elif obj.mode == 'EDIT':
-            selected = [eb.name for eb in context.selected_editable_bones]
-        else:
-            self.report({'ERROR'}, "Must be in Edit or Pose mode")
+        bone_name = get_active_bone_name(context, obj)
+        if not bone_name:
             return {'CANCELLED'}
 
-        if not selected:
-            return {'CANCELLED'}
-        
-        bone_name = selected[0]
-        
-        # 在 Edit Mode 下从 EditBone 读取最新数据
-        bone_data = _get_bone_for_read(obj, bone_name)
-
-        if not bone_data:
+        pose_bone = obj.pose.bones.get(bone_name)
+        if not pose_bone:
             return {'CANCELLED'}
 
-        # Get related settings bone
-        settings_bone = utils_bone_data.get_settings_bone_object(bone_data)
-        if not settings_bone:
+        settings_pb = utils_bone_data.get_settings_bone_object(pose_bone)
+        if not settings_pb:
             self.report({'WARNING'}, "No related settings bone found")
             return {'CANCELLED'}
 
-        # Find the armature object that contains the settings bone
-        info = utils_bone_data.get_settings_bone_info(bone_data)
-        settings_arm_obj = None
-        for scene_obj in context.scene.objects:
-            if scene_obj.type == 'ARMATURE' and scene_obj.data.name == info['armature_name']:
-                settings_arm_obj = scene_obj
-                break
-
+        info = utils_bone_data.get_settings_bone_info(pose_bone)
+        settings_arm_obj = utils_bone_data.find_armature_obj_by_uuid(info['armature_uuid'])
         if not settings_arm_obj:
             self.report({'WARNING'}, "Settings armature not found in scene")
             return {'CANCELLED'}
 
-        # Switch to the settings armature object
         context.view_layer.objects.active = settings_arm_obj
-        settings_arm_data = settings_arm_obj.data
 
-        # Select the settings bone based on current mode
-        if obj.mode == 'POSE':
-            bpy.ops.object.mode_set(mode='POSE')
-            for pb in settings_arm_obj.pose.bones:
-                pb.bone.select = False
-            pose_bone = settings_arm_obj.pose.bones.get(settings_bone.name)
-            if pose_bone:
-                pose_bone.bone.select = True
-                settings_arm_data.bones.active = pose_bone.bone
-        elif obj.mode == 'EDIT':
-            bpy.ops.object.mode_set(mode='EDIT')
-            # 使用 settings_arm_obj.data.edit_bones 而非 arm_data.edit_bones
-            for eb in settings_arm_data.edit_bones:
-                eb.select = False
-            edit_bone = settings_arm_data.edit_bones.get(settings_bone.name)
-            if edit_bone:
-                edit_bone.select = True
-                settings_arm_data.edit_bones.active = edit_bone
+        # Blender 5.0 移除了 Bone.select，通过 Edit Mode 中转实现选中
+        # EditBone.select 仍然可用，且选择状态在切换回 Pose Mode 后保留
+        bpy.ops.object.mode_set(mode='EDIT')
+        for eb in settings_arm_obj.data.edit_bones:
+            eb.select = False
+            eb.select_head = False
+            eb.select_tail = False
+        target_eb = settings_arm_obj.data.edit_bones.get(settings_pb.name)
+        if target_eb:
+            target_eb.select = True
+            target_eb.select_head = True
+            target_eb.select_tail = True
+            settings_arm_obj.data.edit_bones.active = target_eb
+        bpy.ops.object.mode_set(mode='POSE')
 
         for area in context.screen.areas:
             area.tag_redraw()
 
-        self.report({'INFO'}, f"Selected bone: {settings_bone.name}")
+        self.report({'INFO'}, f"Selected bone: {settings_pb.name}")
         return {'FINISHED'}
 
 
@@ -558,36 +396,20 @@ class AMAZING_RIGGING_OT_clear_related_bone(Operator):
 
     def execute(self, context):
         obj = context.active_object
-        if not obj or obj.type != 'ARMATURE':
-            self.report({'ERROR'}, "Please select an armature object")
+        if not obj or obj.type != 'ARMATURE' or obj.mode != 'POSE':
+            self.report({'ERROR'}, "Please select an armature in Pose Mode")
             return {'CANCELLED'}
 
-        arm_data = obj.data
-
-        # Get selected bone name
-        if obj.mode == 'POSE':
-            selected = [pb.name for pb in context.selected_pose_bones]
-        elif obj.mode == 'EDIT':
-            selected = [eb.name for eb in context.selected_editable_bones]
-        else:
-            self.report({'ERROR'}, "Must be in Edit or Pose mode")
+        bone_name = get_active_bone_name(context, obj)
+        if not bone_name:
             return {'CANCELLED'}
 
-        if not selected:
-            return {'CANCELLED'}
-        
-        bone_name = selected[0]
-        
-        # Get writable bone based on mode
-        writable_bone = _get_writable_bone(obj, bone_name)
-        bone_for_read = _get_bone_for_read(obj, bone_name)
+        pose_bone = obj.pose.bones.get(bone_name)
+        if pose_bone:
+            settings_info = utils_bone_data.get_settings_bone_info(pose_bone)
+            target_pb = _get_target_pb_from_info(settings_info)
+            utils_bone_data.clear_settings_bone(pose_bone, target_bone_info=settings_info, target_pose_bone=target_pb)
 
-        if writable_bone:
-            settings_info = utils_bone_data.get_settings_bone_info(bone_for_read) if bone_for_read else None
-            target_bone_for_write = _get_target_bone_for_write_from_info(context, settings_info)
-            utils_bone_data.clear_settings_bone(writable_bone, target_bone_info=settings_info, target_bone_for_write=target_bone_for_write)
-
-        # Clear UI state（使用 _syncing_ui 防止回调冗余修改数据）
         global _syncing_ui
         _syncing_ui = True
         try:
@@ -615,42 +437,36 @@ class AMAZING_RIGGING_OT_select_dependent_bone(Operator):
     armature_uuid: StringProperty()
 
     def execute(self, context):
-        # Find the armature object
         dependent_arm_obj = None
-        for scene_obj in context.scene.objects:
-            if scene_obj.type == 'ARMATURE':
-                if self.armature_uuid and hasattr(scene_obj.data, 'uuid') and scene_obj.data.uuid == self.armature_uuid:
-                    dependent_arm_obj = scene_obj
-                    break
-                elif scene_obj.data.name == self.armature_name:
-                    dependent_arm_obj = scene_obj
-                    break
+        if self.armature_uuid:
+            dependent_arm_obj = utils_bone_data.find_armature_obj_by_uuid(self.armature_uuid)
+        if not dependent_arm_obj and self.armature_name:
+            arm_data = bpy.data.armatures.get(self.armature_name)
+            if arm_data:
+                for obj in bpy.data.objects:
+                    if obj.type == 'ARMATURE' and obj.data == arm_data:
+                        dependent_arm_obj = obj
+                        break
 
         if not dependent_arm_obj:
             self.report({'WARNING'}, "Dependent bone's armature not found in scene")
             return {'CANCELLED'}
 
-        # Switch to the dependent armature object
         context.view_layer.objects.active = dependent_arm_obj
-        dep_arm_data = dependent_arm_obj.data
 
-        # Select the dependent bone based on current mode
-        if context.active_object.mode == 'POSE':
-            bpy.ops.object.mode_set(mode='POSE')
-            for pb in dependent_arm_obj.pose.bones:
-                pb.bone.select = False
-            pose_bone = dependent_arm_obj.pose.bones.get(self.bone_name)
-            if pose_bone:
-                pose_bone.bone.select = True
-                dep_arm_data.bones.active = pose_bone.bone
-        elif context.active_object.mode == 'EDIT':
-            bpy.ops.object.mode_set(mode='EDIT')
-            for eb in dep_arm_data.edit_bones:
-                eb.select = False
-            edit_bone = dep_arm_data.edit_bones.get(self.bone_name)
-            if edit_bone:
-                edit_bone.select = True
-                dep_arm_data.edit_bones.active = edit_bone
+        # Blender 5.0 移除了 Bone.select，通过 Edit Mode 中转实现选中
+        bpy.ops.object.mode_set(mode='EDIT')
+        for eb in dependent_arm_obj.data.edit_bones:
+            eb.select = False
+            eb.select_head = False
+            eb.select_tail = False
+        target_eb = dependent_arm_obj.data.edit_bones.get(self.bone_name)
+        if target_eb:
+            target_eb.select = True
+            target_eb.select_head = True
+            target_eb.select_tail = True
+            dependent_arm_obj.data.edit_bones.active = target_eb
+        bpy.ops.object.mode_set(mode='POSE')
 
         for area in context.screen.areas:
             area.tag_redraw()
@@ -671,47 +487,98 @@ class AMAZING_RIGGING_OT_clear_dependent_bone(Operator):
     armature_uuid: StringProperty()
 
     def execute(self, context):
-        # Find the dependent bone's armature
         dependent_arm_obj = None
-        for scene_obj in context.scene.objects:
-            if scene_obj.type == 'ARMATURE':
-                if self.armature_uuid and hasattr(scene_obj.data, 'uuid') and scene_obj.data.uuid == self.armature_uuid:
-                    dependent_arm_obj = scene_obj
-                    break
-                elif scene_obj.data.name == self.armature_name:
-                    dependent_arm_obj = scene_obj
-                    break
+        if self.armature_uuid:
+            dependent_arm_obj = utils_bone_data.find_armature_obj_by_uuid(self.armature_uuid)
+        if not dependent_arm_obj and self.armature_name:
+            arm_data = bpy.data.armatures.get(self.armature_name)
+            if arm_data:
+                for obj in bpy.data.objects:
+                    if obj.type == 'ARMATURE' and obj.data == arm_data:
+                        dependent_arm_obj = obj
+                        break
 
         if not dependent_arm_obj:
             self.report({'WARNING'}, "Dependent bone's armature not found")
             return {'CANCELLED'}
 
-        dep_arm_data = dependent_arm_obj.data
-
-        # Get the dependent bone object（可写版本）
-        if dependent_arm_obj.mode == 'EDIT':
-            dependent_bone = dep_arm_data.edit_bones.get(self.bone_name)
-        else:
-            dependent_bone = dep_arm_data.bones.get(self.bone_name)
-
-        if not dependent_bone:
+        dep_pb = dependent_arm_obj.pose.bones.get(self.bone_name)
+        if not dep_pb:
             self.report({'WARNING'}, f"Dependent bone '{self.bone_name}' not found")
             return {'CANCELLED'}
 
-        # 读取 settings info 并传递给 clear_settings_bone（用于清理反向引用）
-        settings_info = utils_bone_data.get_settings_bone_info(dependent_bone)
-        target_bone_for_write = None
-        if settings_info:
-            for scene_obj in context.scene.objects:
-                if scene_obj.type == 'ARMATURE' and scene_obj.data.name == settings_info['armature_name']:
-                    target_bone_for_write = _get_target_bone_for_write(scene_obj, settings_info['bone_name'])
-                    break
-        utils_bone_data.clear_settings_bone(dependent_bone, target_bone_info=settings_info, target_bone_for_write=target_bone_for_write)
+        settings_info = utils_bone_data.get_settings_bone_info(dep_pb)
+        target_pb = _get_target_pb_from_info(settings_info)
+        utils_bone_data.clear_settings_bone(dep_pb, target_bone_info=settings_info, target_pose_bone=target_pb)
 
         for area in context.screen.areas:
             area.tag_redraw()
 
         self.report({'INFO'}, f"Cleared association for bone: {self.bone_name}")
+        return {'FINISHED'}
+
+
+class AMAZING_RIGGING_OT_apply_to_all_selected(Operator):
+    """Apply the current settings bone association to all selected bones"""
+    bl_idname = "armature.amazing_rigging_apply_to_all_selected"
+    bl_label = ""
+    bl_description = "Apply settings bone to all selected bones"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        obj = context.active_object
+        if not obj or obj.type != 'ARMATURE' or obj.mode != 'POSE':
+            self.report({'ERROR'}, "Please select an armature in Pose Mode")
+            return {'CANCELLED'}
+
+        ui_state = context.scene.amazing_rigging_ui
+        arm_obj = ui_state.target_armature
+        target_bone_name = ui_state.target_bone
+
+        if not arm_obj or not target_bone_name:
+            self.report({'WARNING'}, "Please set target armature and bone first")
+            return {'CANCELLED'}
+
+        target_pb = arm_obj.pose.bones.get(target_bone_name)
+        if not target_pb:
+            self.report({'WARNING'}, f"Target bone '{target_bone_name}' not found")
+            return {'CANCELLED'}
+
+        active_bone_name = get_active_bone_name(context, obj)
+        selected_pbs = [pb for pb in context.selected_pose_bones
+                        if pb.name != active_bone_name]
+
+        if not selected_pbs:
+            self.report({'INFO'}, "No other bones selected")
+            return {'CANCELLED'}
+
+        # 过滤掉与目标骨骼相同的骨骼（避免为骨骼自身设置自身）
+        if obj.data == arm_obj.data and obj.name == arm_obj.name:
+            selected_pbs = [pb for pb in selected_pbs if pb.name != target_bone_name]
+
+        if not selected_pbs:
+            self.report({'INFO'}, "No valid bones to apply")
+            return {'CANCELLED'}
+
+        applied_count = 0
+        for pb in selected_pbs:
+            current_info = utils_bone_data.get_settings_bone_info(pb)
+            if current_info:
+                current_target_pb = _get_target_pb_from_info(current_info)
+                utils_bone_data.clear_settings_bone(pb, target_bone_info=current_info, target_pose_bone=current_target_pb)
+
+            result = utils_bone_data.set_settings_bone(
+                pb, target_bone_name, arm_obj,
+                source_arm_obj=obj, source_pose_bone=pb,
+                target_pose_bone=target_pb
+            )
+            if result:
+                applied_count += 1
+
+        for area in context.screen.areas:
+            area.tag_redraw()
+
+        self.report({'INFO'}, f"Applied to {applied_count} bones")
         return {'FINISHED'}
 
 
@@ -731,50 +598,36 @@ class AMAZING_RIGGING_PT_bone_settings(Panel):
         obj = context.active_object
         if not obj or obj.type != 'ARMATURE':
             return False
-        return obj.mode in ('EDIT', 'POSE')
+        if obj.mode != 'POSE':
+            return False
+        return get_active_bone_name(context, obj) is not None
 
     def draw(self, context):
         layout = self.layout
         obj = context.active_object
-        arm_data = obj.data
         ui_state = context.scene.amazing_rigging_ui
-        
-        # Get current bone from context
-        bone_name = None
-        if obj.mode == 'POSE':
-            if context.bone:
-                bone_name = context.bone.name
-            elif context.selected_pose_bones:
-                bone_name = context.selected_pose_bones[0].name
-        elif obj.mode == 'EDIT':
-            if context.edit_bone:
-                bone_name = context.edit_bone.name
-            elif context.selected_editable_bones:
-                bone_name = context.selected_editable_bones[0].name
-        
+
+        bone_name = get_active_bone_name(context, obj)
+
         if not bone_name:
             layout.label(text="No bone selected", icon='INFO')
             return
 
-        # 在 Edit Mode 下从 EditBone 读取最新自定义属性
-        bone_data = _get_bone_for_read(obj, bone_name)
-
-        if not bone_data:
+        pose_bone = obj.pose.bones.get(bone_name)
+        if not pose_bone:
             return
 
-        settings_info = utils_bone_data.get_settings_bone_info(bone_data)
+        settings_info = utils_bone_data.get_settings_bone_info(pose_bone)
 
         # ── Set Settings Bone ──
         box = layout.box()
         box.label(text="Set Settings Bone:", icon='BONE_DATA')
 
-        # Target armature row: object field + delete button
         row = box.row(align=True)
         row.prop(ui_state, "target_armature", text="Target")
         if ui_state.target_armature:
             row.operator("armature.amazing_rigging_clear_target", text="", icon='X')
 
-        # Target bone row: text input + dropdown + delete button
         row = box.row(align=True)
         row.prop(ui_state, "target_bone", text="Bone", icon='BONE_DATA')
         if ui_state.target_bone:
@@ -783,11 +636,17 @@ class AMAZING_RIGGING_PT_bone_settings(Panel):
         elif ui_state.target_armature:
             row.menu("AMAZING_RIGGING_MT_bone_selection", text="", icon='DOWNARROW_HLT')
 
-        # ── Related Bone (显示已关联的 settings bone) ──
+        # Apply to All Selected 按钮
+        if ui_state.target_armature and ui_state.target_bone:
+            row = box.row()
+            row.operator("armature.amazing_rigging_apply_to_all_selected",
+                         text="Apply to All Selected", icon='GROUP_BONE')
+
+        # ── Related Bone ──
         if settings_info:
             layout.separator()
-            settings_bone_obj = utils_bone_data.get_settings_bone_object(bone_data)
-            if settings_bone_obj:
+            settings_pb = utils_bone_data.get_settings_bone_object(pose_bone)
+            if settings_pb:
                 row = layout.row(align=True)
                 row.label(text="Related Bone:", icon='LINKED')
                 row.label(text=settings_info['armature_name'])
@@ -795,8 +654,8 @@ class AMAZING_RIGGING_PT_bone_settings(Panel):
                 row.operator("armature.amazing_rigging_select_related_bone", text="", icon='FILE_PARENT')
                 row.operator("armature.amazing_rigging_clear_related_bone", text="", icon='X')
 
-        # ── Dependent Bones (显示关联到当前骨骼的从属骨骼) ──
-        dependent_bones = utils_bone_data.get_dependent_bones(bone_data)
+        # ── Dependent Bones ──
+        dependent_bones = utils_bone_data.get_dependent_bones(pose_bone)
         if dependent_bones:
             layout.separator()
             box_dep = layout.box()
@@ -808,13 +667,11 @@ class AMAZING_RIGGING_PT_bone_settings(Panel):
                 if dep.get('armature_name'):
                     row.label(text=f"({dep['armature_name']})")
 
-                # 跳转按钮
                 op = row.operator("armature.amazing_rigging_select_dependent_bone", text="", icon='FILE_PARENT')
                 op.bone_name = dep['bone_name']
                 op.armature_name = dep.get('armature_name', '')
                 op.armature_uuid = dep.get('armature_uuid', '')
 
-                # 删除按钮
                 op = row.operator("armature.amazing_rigging_clear_dependent_bone", text="", icon='X')
                 op.bone_name = dep['bone_name']
                 op.armature_name = dep.get('armature_name', '')
@@ -831,6 +688,7 @@ classes = [
     AMAZING_RIGGING_OT_clear_related_bone,
     AMAZING_RIGGING_OT_select_dependent_bone,
     AMAZING_RIGGING_OT_clear_dependent_bone,
+    AMAZING_RIGGING_OT_apply_to_all_selected,
     AMAZING_RIGGING_PT_bone_settings,
 ]
 

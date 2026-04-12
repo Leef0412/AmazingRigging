@@ -36,6 +36,9 @@ _processing_collection_change = False
 
 _last_active_armature = None
 
+# 属性迁移标志（确保只执行一次）
+_migration_done = False
+
 def on_selection_change():
     global _last_active_armature
 
@@ -287,34 +290,36 @@ def check_bone_deletions():
 
 
 def cleanup_invalid_references():
-    """清理所有无效的 settings bone 引用"""
+    """清理所有无效的 settings bone 引用（基于 PoseBone）"""
     from . import utils_bone_data
-    
+
     try:
         cleaned_count = 0
-        
-        for arm_data in bpy.data.armatures:
-            for bone in arm_data.bones:
-                settings_info = utils_bone_data.get_settings_bone_info(bone)
-                
+
+        for obj in bpy.data.objects:
+            if obj.type != 'ARMATURE':
+                continue
+            for pb in obj.pose.bones:
+                settings_info = utils_bone_data.get_settings_bone_info(pb)
+
                 if not settings_info:
                     continue
-                
+
                 # 验证 settings bone 是否仍然存在
-                settings_bone = utils_bone_data.get_settings_bone_object(bone)
-                
-                if settings_bone is None:
+                settings_pb = utils_bone_data.get_settings_bone_object(pb)
+
+                if settings_pb is None:
                     # settings bone 已不存在，清除引用
-                    print(f"[DEBUG] 清理无效引用: {arm_data.name}/{bone.name} -> {settings_info['armature_name']}/{settings_info['bone_name']} (已删除)")
-                    utils_bone_data.clear_settings_bone(bone)
+                    print(f"[DEBUG] 清理无效引用: {obj.name}/{pb.name} -> {settings_info['armature_name']}/{settings_info['bone_name']} (已删除)")
+                    utils_bone_data.clear_settings_bone(pb)
                     cleaned_count += 1
-        
+
         if cleaned_count > 0:
             print(f"[DEBUG] 共清理了 {cleaned_count} 个无效的 settings bone 引用")
             # 触发 UI 刷新
             for area in bpy.context.screen.areas:
                 area.tag_redraw()
-    
+
     except Exception as e:
         print(f"[ERROR] cleanup_invalid_references 异常: {e}")
         import traceback
@@ -324,8 +329,17 @@ def cleanup_invalid_references():
 @persistent
 def depsgraph_update_handler(scene):
     """检测 Bone Collection 重命名或删除，以及选择变化"""
+    global _migration_done
     try:
         obj = bpy.context.object
+
+        # 首次场景更新时执行属性迁移（比定时器更可靠）
+        if not _migration_done:
+            try:
+                utils_bone_data.migrate_bone_properties()
+                _migration_done = True
+            except Exception:
+                pass
 
         on_selection_change()
         
@@ -452,15 +466,18 @@ def on_load_post(dummy):
     print("\n=== [DEBUG] on_load_post 被调用 ===")
     
     # 清空缓存和重置状态
-    global _timer_active, _poll_count, _processing_collection_change
+    global _timer_active, _poll_count, _processing_collection_change, _migration_done
     _collection_name_cache.clear()
     _timer_active = False
     _poll_count = 0
     _processing_collection_change = False
+    _migration_done = False  # 文件加载后需要重新迁移
     
     # 重置 ui_bone_properties 的全局状态
     ui_bone_properties.reset_state()
-    
+
+    # 属性迁移将在首次 depsgraph_update 时执行（_migration_done 已重置为 False）
+
     print("[DEBUG] 已清空缓存并重置定时器状态")
     
     # 重新请求启动定时器（会在 initialize_all_caches 中实际注册）
@@ -595,6 +612,8 @@ def register():
     
     # 注册 ui_bone_properties 的 Scene 属性
     ui_bone_properties.register()
+
+    # 属性迁移将在首次 depsgraph_update 时执行（比定时器更可靠）
     
     # 延迟初始化 UUID（在 Blender 完全加载后执行）
     def initialize_uuids():

@@ -233,6 +233,9 @@ class AMAZING_RIGGING_PT_main_sidebar(Panel):
         # === Custom Properties (新增) ===
         self._draw_custom_properties(layout, context, target_armature)
         
+        # === Settings Bone Summary ===
+        self._draw_settings_bone_summary(layout, context, target_armature)
+        
         layout.separator()
 
         layout.label(text="Bone Collections", icon='GROUP_BONE')
@@ -402,68 +405,113 @@ class AMAZING_RIGGING_PT_main_sidebar(Panel):
                                 else:
                                     row_flow.label(text=item.note)
     
+    def _draw_settings_bone_summary(self, layout, context, armature):
+        """在侧栏显示主导骨骼（settings bone）的 Custom Properties"""
+        if not armature:
+            return
+
+        obj = context.active_object
+        if not obj or obj.type != 'ARMATURE':
+            return
+
+        if obj.mode != 'POSE':
+            return
+
+        # 获取当前选中骨骼（Pose Mode only）
+        from . import ui_bone_properties
+        bone_name = ui_bone_properties.get_active_bone_name(context, obj)
+        if not bone_name:
+            return
+
+        pose_bone = obj.pose.bones.get(bone_name)
+        if not pose_bone:
+            return
+
+        # 获取关联的 settings bone 信息
+        settings_info = utils_bone_data.get_settings_bone_info(pose_bone)
+        if not settings_info:
+            return
+
+        # 查找 settings bone 所属的 armature 对象
+        settings_arm_obj = utils_bone_data.find_armature_obj_by_uuid(settings_info['armature_uuid'])
+        if not settings_arm_obj:
+            arm_data = bpy.data.armatures.get(settings_info['armature_name'])
+            if arm_data:
+                for o in bpy.data.objects:
+                    if o.type == 'ARMATURE' and o.data == arm_data:
+                        settings_arm_obj = o
+                        break
+        if not settings_arm_obj:
+            return
+
+        # 获取 settings PoseBone 对象
+        settings_pb = settings_arm_obj.pose.bones.get(settings_info['bone_name'])
+        if not settings_pb:
+            return
+
+        # 读取 settings bone 的自定义属性（过滤内部键名）
+        prop_keys = [k for k in settings_pb.keys() if k not in utils_bone_data.INTERNAL_KEYS]
+
+        if not prop_keys:
+            return
+
+        # 显示标题（settings bone 名称）
+        box = layout.box()
+        box.label(text="Settings Bone: " + settings_info['bone_name'], icon='BONE_DATA')
+
+        for key in prop_keys:
+            value = settings_pb[key]
+            row = box.row()
+
+            if isinstance(value, (int, float)):
+                row.prop(settings_pb, f'["{key}"]', text=key)
+            elif isinstance(value, str):
+                row.label(text=f"{key}: {value}")
+            else:
+                row.label(text=f"{key}: {str(value)}")
+
     def _draw_custom_properties(self, layout, context, armature):
         """绘制 Custom Properties 面板 - 过滤内部属性"""
         if not armature:
             return
-        
+
         obj = context.active_object
         if not obj or obj.type != 'ARMATURE':
             return
-        
-        arm_data = armature.data
-        
-        # 获取选中的 bone
-        if obj.mode == 'POSE':
-            selected_bone_names = [pb.name for pb in context.selected_pose_bones]
-        elif obj.mode == 'EDIT':
-            selected_bone_names = [eb.name for eb in context.selected_editable_bones]
-        else:
-            selected_bone_names = []
-        
-        if not selected_bone_names:
+
+        # 仅 Pose Mode 显示
+        if obj.mode != 'POSE':
             return
-        
-        # 获取 bone 对象
-        bone_name = selected_bone_names[0]
-        bone_data = arm_data.bones.get(bone_name)
-        
-        if not bone_data:
+
+        # 获取选中的 PoseBone
+        selected_pbs = context.selected_pose_bones
+        if not selected_pbs:
             return
-        
+
+        pose_bone = selected_pbs[0]
+        if not pose_bone:
+            return
+
         # 过滤内部属性
-        INTERNAL_KEYS = {
-            'amazing_settings_bone',
-            'amazing_settings_armature',
-            'amazing_settings_armature_uuid',
-            '_RNA_UI'
-        }
-        
-        # 获取所有自定义属性（排除内部属性）
-        prop_keys = [k for k in bone_data.keys() if k not in INTERNAL_KEYS]
-        
+        prop_keys = [k for k in pose_bone.keys() if k not in utils_bone_data.INTERNAL_KEYS]
+
         if not prop_keys:
             return
-        
+
         # 显示 Custom Properties
         box = layout.box()
         box.label(text="Custom Properties", icon='PROPERTIES')
-        
-        # 读取属性 UI 配置
-        custom_props = bone_data.get("_RNA_UI", {})
-        
+
         for key in prop_keys:
-            value = bone_data[key]
+            value = pose_bone[key]
             row = box.row()
-            prop_ui = custom_props.get(key, {})
-            display_name = prop_ui.get('name', key)
-            
+
             if isinstance(value, (int, float)):
-                row.prop(bone_data, f'["{key}"]', text=display_name)
+                row.prop(pose_bone, f'["{key}"]', text=key)
             elif isinstance(value, str):
-                row.label(text=f"{display_name}: {value}")
+                row.label(text=f"{key}: {value}")
             else:
-                row.label(text=f"{display_name}: {str(value)}")
+                row.label(text=f"{key}: {str(value)}")
 
 classes = [
     AMAZING_RIGGING_OT_toggle_ui_panel_rule,
