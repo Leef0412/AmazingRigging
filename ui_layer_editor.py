@@ -113,7 +113,27 @@ class AMAZING_RIGGING_OT_init_data(Operator):
 
                 should_include = False
 
-                for bone in b_col.bones:
+                # 获取集合中的骨骼列表
+                # 在 Pose Mode 下直接使用 b_col.bones
+                # 在 Edit Mode 下 b_col.bones 不可用，需要遍历 arm_data.bones 并检查 bone.collections
+                col_bones = []
+                
+                if obj.mode == 'EDIT':
+                    # Edit Mode: 遍历所有骨骼，检查是否属于当前集合
+                    for bone in arm_data.bones:
+                        # bone.collections 返回该骨骼所属的所有集合
+                        if any(col.name == b_col.name for col in bone.collections):
+                            col_bones.append(bone)
+                else:
+                    # Pose Mode / Object Mode: 直接使用 b_col.bones
+                    try:
+                        col_bones = list(b_col.bones)
+                    except AttributeError:
+                        # 如果无法访问，跳过此集合
+                        continue
+
+                # 遍历集合中的所有骨骼，检查是否匹配规则的前缀或精确匹配
+                for bone in col_bones:
                     bone_name = bone.name
 
                     for prefix_item in rule.prefixes:
