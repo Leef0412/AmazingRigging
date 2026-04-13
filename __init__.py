@@ -570,21 +570,28 @@ def initialize_default_split_rules():
                     p = rule1.prefixes.add()
                     p.value = prefix
 
-                # 创建默认规则 2: Support & MCH
+                # 创建默认规则 2: Settings
                 rule2 = armature.amazing_split_rules.add()
-                rule2.name = "Support & MCH"
+                rule2.name = "Settings"
                 rule2.is_hidden = False
+                p = rule2.prefixes.add()
+                p.value = "SET-"
+
+                # 创建默认规则 3: Support & MCH
+                rule3 = armature.amazing_split_rules.add()
+                rule3.name = "Support & MCH"
+                rule3.is_hidden = False
                 for prefix in ("IK-", "MCH-", "ORG-", "TGT-", "SWITCH-", "VIS-"):
-                    p = rule2.prefixes.add()
+                    p = rule3.prefixes.add()
                     p.value = prefix
 
-                # 创建默认规则 3: Deform
-                rule3 = armature.amazing_split_rules.add()
-                rule3.name = "Deform"
-                rule3.is_hidden = False
-                p = rule3.prefixes.add()
+                # 创建默认规则 4: Deform
+                rule4 = armature.amazing_split_rules.add()
+                rule4.name = "Deform"
+                rule4.is_hidden = False
+                p = rule4.prefixes.add()
                 p.value = "DEF-"
-                e = rule3.exact_matches.add()
+                e = rule4.exact_matches.add()
                 e.value = "Root"
 
                 # 自动创建 "Other" 规则（用于收集未匹配的骨骼集合）
