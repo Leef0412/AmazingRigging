@@ -51,15 +51,23 @@ def on_selection_change():
 
         if current_armature != _last_active_armature:
             if _last_active_armature is not None:
-                print(f"\n[DEBUG] checked switch armature:")
-                print(f"  - From: {_last_active_armature.name}")
-                print(f"  - To: {current_armature.name if current_armature else 'None'}")
+                # 检查 _last_active_armature 是否仍然有效（可能已被删除）
+                try:
+                    last_name = _last_active_armature.name
+                    print(f"\n[DEBUG] checked switch armature:")
+                    print(f"  - From: {last_name}")
+                    print(f"  - To: {current_armature.name if current_armature else 'None'}")
 
-                if hasattr(_last_active_armature, 'amazing_props'):
-                    if _last_active_armature.amazing_props.editing_item_key:
-                        print(f"  - Old armature editing_key: '{_last_active_armature.amazing_props.editing_item_key}'")
-                    if _last_active_armature.amazing_props.editing_pocket_key:
-                        print(f"  - Old armature editing_pocket_key: '{_last_active_armature.amazing_props.editing_pocket_key}'")
+                    if hasattr(_last_active_armature, 'amazing_props'):
+                        if _last_active_armature.amazing_props.editing_item_key:
+                            print(f"  - Old armature editing_key: '{_last_active_armature.amazing_props.editing_item_key}'")
+                        if _last_active_armature.amazing_props.editing_pocket_key:
+                            print(f"  - Old armature editing_pocket_key: '{_last_active_armature.amazing_props.editing_pocket_key}'")
+                except ReferenceError:
+                    # armature 已被删除，跳过日志输出
+                    print(f"\n[DEBUG] checked switch armature:")
+                    print(f"  - From: <deleted>")
+                    print(f"  - To: {current_armature.name if current_armature else 'None'}")
 
             if current_armature is not None and hasattr(current_armature, 'amazing_props'):
                 if current_armature.amazing_props.editing_item_key:
@@ -99,6 +107,83 @@ def reindex_rows(arm_data, grid_data):
     for pocket in arm_data.amazing_bone_pockets:
         if pocket.row in old_to_new_row:
             pocket.row = old_to_new_row[pocket.row]
+
+
+def _auto_classify_new_collections(arm_data, new_collection_names):
+    """自动分类新增的骨骼集合到对应的 Split Rule"""
+    if not new_collection_names:
+        return
+    
+    grid_data = arm_data.amazing_grid_data
+    rules = arm_data.amazing_split_rules
+    
+    if not rules or len(rules) == 0:
+        print(f"[DEBUG] 没有 split rules，跳过自动分类")
+        return
+    
+    for col_name in new_collection_names:
+        classified = False
+        
+        # 遍历所有规则（除了最后一个 "Other" 规则）
+        for rule_idx, rule in enumerate(rules):
+            # 跳过 "Other" 规则（它是兜底规则）
+            if rule.name == "Other":
+                continue
+            
+            # 检查是否匹配当前规则
+            has_prefixes = len(rule.prefixes) > 0 and any(p.value for p in rule.prefixes)
+            has_exact = len(rule.exact_matches) > 0 and any(e.value for e in rule.exact_matches)
+            
+            if not has_prefixes and not has_exact:
+                continue
+            
+            should_include = False
+            
+            # 检查集合名称是否匹配规则前缀
+            for prefix_item in rule.prefixes:
+                if prefix_item.value and col_name.startswith(prefix_item.value):
+                    should_include = True
+                    break
+            
+            # 检查集合名称是否匹配精确匹配
+            if not should_include:
+                for exact_item in rule.exact_matches:
+                    if exact_item.value and col_name == exact_item.value:
+                        should_include = True
+                        break
+            
+            # 如果匹配，添加到 grid_data
+            if should_include:
+                item = grid_data.add()
+                item.name = col_name
+                item.row = len(grid_data)  # 添加到最后一行
+                item.col = 0
+                item.note = col_name
+                item.rule_index = rule_idx
+                
+                print(f"[DEBUG] 自动分类: '{col_name}' -> Rule {rule_idx} ({rule.name})")
+                classified = True
+                break
+        
+        # 如果没有匹配到任何规则，添加到 "Other" 规则
+        if not classified:
+            other_rule_idx = None
+            for idx, rule in enumerate(rules):
+                if rule.name == "Other":
+                    other_rule_idx = idx
+                    break
+            
+            if other_rule_idx is not None:
+                item = grid_data.add()
+                item.name = col_name
+                item.row = len(grid_data)
+                item.col = 0
+                item.note = col_name
+                item.rule_index = other_rule_idx
+                
+                print(f"[DEBUG] 自动分类: '{col_name}' -> Other Rule")
+            else:
+                print(f"[DEBUG] 警告: 未找到 'Other' 规则，'{col_name}' 未被分类")
 
 
 def on_collection_rename_for_armature(old_names, new_names, obj):
@@ -228,8 +313,19 @@ def on_collection_rename_for_armature(old_names, new_names, obj):
             print("[DEBUG] 没有变化")
         elif not removed_names and added_names:
             print(f"[DEBUG] 仅新增 collection: {added_names}")
+            # 自动分类新增的集合
+            _auto_classify_new_collections(arm_data, added_names)
+            # 刷新 UI
+            for area in bpy.context.screen.areas:
+                area.tag_redraw()
         elif len(removed_names) > 1 or len(added_names) > 1:
             print(f"[DEBUG] 复杂操作 (删除:{len(removed_names)}, 新增:{len(added_names)})")
+            # 如果有新增的集合，也进行自动分类
+            if added_names:
+                _auto_classify_new_collections(arm_data, added_names)
+                # 刷新 UI
+                for area in bpy.context.screen.areas:
+                    area.tag_redraw()
 
         print("=== [DEBUG] on_collection_rename 结束 ===\n")
     except Exception as e:

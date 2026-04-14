@@ -526,8 +526,16 @@ class AMAZING_RIGGING_PT_bone_collections(Panel):
             layout.label(text="No split rules defined", icon='INFO')
             return
         
-        # 遍历所有 rules 并绘制
+        # 遍历所有 rules 并绘制（跳过空规则）
         for rule_idx, rule in enumerate(rules):
+            # 检查该规则是否有匹配的骨骼
+            grid_data = getattr(arm_data, "amazing_grid_data", [])
+            rule_items = [item for item in grid_data if item.rule_index == rule_idx]
+            
+            # 如果该规则没有匹配的骨骼，跳过不绘制
+            if not rule_items:
+                continue
+            
             # 绘制分隔线
             layout.separator()
             

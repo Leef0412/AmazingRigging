@@ -1244,14 +1244,41 @@ class AMAZING_RIGGING_OT_add_split_rule(Operator):
         arm_data = context.armature if hasattr(context, "armature") else context.active_object.data
         props = arm_data.amazing_props
 
-        rule = arm_data.amazing_split_rules.add()
-        rule.name = "New Rule"
-        rule.is_hidden = False
+        # 检查是否存在 "Other" 规则
+        other_rule_idx = None
+        for idx, rule in enumerate(arm_data.amazing_split_rules):
+            if rule.name == "Other":
+                other_rule_idx = idx
+                break
+
+        # 如果存在 Other 规则，需要先移除它，添加新规则后再重新添加 Other
+        if other_rule_idx is not None:
+            # 保存 Other 规则的位置（应该在最后）
+            other_rule = arm_data.amazing_split_rules[other_rule_idx]
+            
+            # 移除 Other 规则
+            arm_data.amazing_split_rules.remove(other_rule_idx)
+            
+            # 添加新规则（现在 Other 不在列表中，新规则会添加到倒数第二的位置）
+            rule = arm_data.amazing_split_rules.add()
+            rule.name = "New Rule"
+            rule.is_hidden = False
+            
+            # 重新添加 Other 规则到最后
+            new_other = arm_data.amazing_split_rules.add()
+            new_other.name = "Other"
+            new_other.is_hidden = False
+            # Other 规则保持为空规则（无前缀和精确匹配）
+        else:
+            # 没有 Other 规则，直接添加新规则
+            rule = arm_data.amazing_split_rules.add()
+            rule.name = "New Rule"
+            rule.is_hidden = False
 
         for area in context.screen.areas:
             area.tag_redraw()
 
-        self.report({'INFO'}, f"Added split rule: {rule.name}")
+        self.report({'INFO'}, f"Added split rule: New Rule")
         return {'FINISHED'}
 
 class AMAZING_RIGGING_OT_remove_split_rule(Operator):
