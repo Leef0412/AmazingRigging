@@ -7,3 +7,4 @@ nul
 SPLIT_RULES_USAGE.md
 blender_manifest.toml
 extensions.toml
+extensions/
