@@ -113,7 +113,12 @@ def reindex_rows(arm_data, grid_data):
 
 
 def _auto_classify_new_collections(arm_data, new_collection_names):
-    """自动分类新增的骨骼集合到对应的 Split Rule"""
+    """自动分类新增的骨骼集合到对应的 Split Rule
+    
+    通过调用 _rebuild_grid_after_rule_migration 重建整个 grid，
+    确保所有 collection（包括新增的）都按规则正确分类。
+    与 AMAZING_RIGGING_OT_init_data 的逻辑一致：基于骨骼名称匹配规则。
+    """
     if not new_collection_names:
         return
     
@@ -124,69 +129,30 @@ def _auto_classify_new_collections(arm_data, new_collection_names):
         print(f"[DEBUG] 没有 split rules，跳过自动分类")
         return
     
+    print(f"[DEBUG] _auto_classify_new_collections 开始: new_collections={new_collection_names}")
+    
+    # 重建整个 grid，确保所有 collection 都按规则正确分类
+    # _rebuild_grid_after_rule_migration 会遍历所有 bone collections（包括新增的）
+    # 并根据骨骼名称匹配规则前缀/精确匹配
+    _rebuild_grid_after_rule_migration(arm_data)
+    
+    # 重建后检查新 collection 是否被正确分类
+    grid_data = arm_data.amazing_grid_data
+    grid_names = {item.name for item in grid_data}
+    
     for col_name in new_collection_names:
-        classified = False
-        
-        # 遍历所有规则（除了最后一个 "Other" 规则）
-        for rule_idx, rule in enumerate(rules):
-            # 跳过 "Other" 规则（它是兜底规则）
-            if rule.name == "Other":
-                continue
-            
-            # 检查是否匹配当前规则
-            has_prefixes = len(rule.prefixes) > 0 and any(p.value for p in rule.prefixes)
-            has_exact = len(rule.exact_matches) > 0 and any(e.value for e in rule.exact_matches)
-            
-            if not has_prefixes and not has_exact:
-                continue
-            
-            should_include = False
-            
-            # 检查集合名称是否匹配规则前缀
-            for prefix_item in rule.prefixes:
-                if prefix_item.value and col_name.startswith(prefix_item.value):
-                    should_include = True
+        if col_name in grid_names:
+            # 找到该 collection 在 grid 中的 item
+            for item in grid_data:
+                if item.name == col_name:
+                    # 找到对应的规则
+                    rule_name = rules[item.rule_index].name if item.rule_index < len(rules) else "Unknown"
+                    print(f"[DEBUG] 自动分类: '{col_name}' -> Rule {item.rule_index} ({rule_name}), row={item.row}")
                     break
-            
-            # 检查集合名称是否匹配精确匹配
-            if not should_include:
-                for exact_item in rule.exact_matches:
-                    if exact_item.value and col_name == exact_item.value:
-                        should_include = True
-                        break
-            
-            # 如果匹配，添加到 grid_data
-            if should_include:
-                item = grid_data.add()
-                item.name = col_name
-                item.row = len(grid_data)  # 添加到最后一行
-                item.col = 0
-                item.note = col_name
-                item.rule_index = rule_idx
-                
-                print(f"[DEBUG] 自动分类: '{col_name}' -> Rule {rule_idx} ({rule.name})")
-                classified = True
-                break
-        
-        # 如果没有匹配到任何规则，添加到 "Other" 规则
-        if not classified:
-            other_rule_idx = None
-            for idx, rule in enumerate(rules):
-                if rule.name == "Other":
-                    other_rule_idx = idx
-                    break
-            
-            if other_rule_idx is not None:
-                item = grid_data.add()
-                item.name = col_name
-                item.row = len(grid_data)
-                item.col = 0
-                item.note = col_name
-                item.rule_index = other_rule_idx
-                
-                print(f"[DEBUG] 自动分类: '{col_name}' -> Other Rule")
-            else:
-                print(f"[DEBUG] 警告: 未找到 'Other' 规则，'{col_name}' 未被分类")
+        else:
+            print(f"[DEBUG] 警告: '{col_name}' 未在 grid 中找到")
+    
+    print(f"[DEBUG] _auto_classify_new_collections 完成: grid 现在有 {len(grid_data)} 项")
 
 
 def on_collection_rename_for_armature(old_names, new_names, obj):
@@ -638,6 +604,9 @@ def initialize_all_caches():
     # 初始化默认 split rules（版本检测和迁移）
     initialize_default_split_rules()
     
+    # 强制验证并修复所有 grid_data 的 rule_index（无论规则是否迁移）
+    _validate_and_fix_grid_rule_indices()
+    
     print("=== [DEBUG] initialize_all_caches 结束 ===\n")
     return None  # 只执行一次
 
@@ -653,6 +622,137 @@ def delayed_initialize():
 # 版本 2: Controller, Settings, Support & MCH, Deform, Other (5个规则)
 # 版本 3: Controller, Data Flow, MCH & Clac, Settings & Val, Visual & Props, Other (6个规则)
 CURRENT_RULES_VERSION = 3
+
+
+def _rebuild_grid_after_rule_migration(armature):
+    """规则迁移后重建 grid_data，确保所有 item 的 rule_index 指向新规则。
+    
+    与 AMAZING_RIGGING_OT_init_data 的逻辑一致：
+    - 遍历集合中的每个骨骼，检查骨骼名称是否匹配规则前缀
+    - 只要集合中有任意一个骨骼匹配规则，整个集合就归入该规则
+    
+    注意：需要获取 armature object 以检查 mode（Edit Mode 下 b_col.bones 不可用）
+    """
+    grid_data = armature.amazing_grid_data
+    rules = armature.amazing_split_rules
+    b_cols = armature.collections
+    
+    if not rules or len(rules) == 0:
+        return
+    
+    # 获取 armature object（用于检查 mode）
+    obj = None
+    for scene_obj in bpy.context.scene.objects:
+        if scene_obj.type == 'ARMATURE' and scene_obj.data == armature:
+            obj = scene_obj
+            break
+    
+    # 找到 "Other" 规则的索引
+    other_rule_idx = None
+    for idx, rule in enumerate(rules):
+        if rule.name == "Other":
+            other_rule_idx = idx
+            break
+    
+    if other_rule_idx is None:
+        return
+    
+    # 清空旧的 grid_data
+    grid_data.clear()
+    
+    # 按新规则重新分类（与 init_data 的两遍分类逻辑一致）
+    matched_names = set()
+    rule_collections = {}  # rule_idx -> list of collection names
+    
+    # 初始化所有规则的集合列表
+    for rule_idx in range(len(rules)):
+        rule_collections[rule_idx] = []
+    
+    print(f"[DEBUG] 开始重建 grid: {len(b_cols)} 个 bone collections")
+    
+    # 第一遍：匹配有 prefix/exact 的具体规则（基于骨骼名称）
+    for rule_idx, rule in enumerate(rules):
+        has_prefixes = len(rule.prefixes) > 0 and any(p.value for p in rule.prefixes)
+        has_exact = len(rule.exact_matches) > 0 and any(e.value for e in rule.exact_matches)
+        if not has_prefixes and not has_exact:
+            continue
+        
+        print(f"[DEBUG]   检查规则 {rule_idx} ({rule.name}): prefixes={[p.value for p in rule.prefixes]}, exact={[e.value for e in rule.exact_matches]}")
+        
+        for b_col in b_cols:
+            if b_col.name in matched_names:
+                continue
+            
+            # 获取集合中的骨骼列表（与 init_data 一致）
+            col_bones = []
+            if obj and obj.mode == 'EDIT':
+                # Edit Mode: 遍历所有骨骼，检查是否属于当前集合
+                for bone in armature.bones:
+                    if any(col.name == b_col.name for col in bone.collections):
+                        col_bones.append(bone)
+            else:
+                # Pose Mode / Object Mode: 直接使用 b_col.bones
+                try:
+                    col_bones = list(b_col.bones)
+                except (AttributeError, RuntimeError):
+                    continue
+            
+            # 遍历集合中的所有骨骼，检查是否匹配规则的前缀或精确匹配
+            should_include = False
+            for bone in col_bones:
+                bone_name = bone.name
+                
+                for prefix_item in rule.prefixes:
+                    if prefix_item.value and bone_name.startswith(prefix_item.value):
+                        should_include = True
+                        print(f"[DEBUG]     ✓ '{b_col.name}' 包含骨骼 '{bone_name}' 匹配前缀 '{prefix_item.value}'")
+                        break
+                
+                if not should_include:
+                    for exact_item in rule.exact_matches:
+                        if exact_item.value and bone_name == exact_item.value:
+                            should_include = True
+                            print(f"[DEBUG]     ✓ '{b_col.name}' 包含骨骼 '{bone_name}' 精确匹配 '{exact_item.value}'")
+                            break
+                
+                if should_include:
+                    break
+            
+            if should_include:
+                rule_collections[rule_idx].append(b_col.name)
+                matched_names.add(b_col.name)
+    
+    # 第二遍：未匹配的归入 "Other" 规则（catch-all）
+    for rule_idx, rule in enumerate(rules):
+        has_prefixes = len(rule.prefixes) > 0 and any(p.value for p in rule.prefixes)
+        has_exact = len(rule.exact_matches) > 0 and any(e.value for e in rule.exact_matches)
+        
+        if not has_prefixes and not has_exact:
+            # 这是 catch-all 规则（如 "Other"）
+            for b_col in b_cols:
+                if b_col.name not in matched_names:
+                    print(f"[DEBUG]   '{b_col.name}' 未匹配任何规则，归入 '{rule.name}'")
+                    rule_collections[rule_idx].append(b_col.name)
+                    matched_names.add(b_col.name)
+    
+    # 将所有匹配的集合添加到 grid_data
+    for rule_idx in sorted(rule_collections.keys()):
+        collections = rule_collections[rule_idx]
+        
+        if not collections:
+            continue
+        
+        # 添加该规则下的所有集合
+        for col_idx, col_name in enumerate(collections):
+            item = grid_data.add()
+            item.name = col_name
+            item.row = col_idx
+            item.col = 0
+            item.note = col_name
+            item.rule_index = rule_idx
+    
+    print(f"[DEBUG] 规则迁移后重建 grid_data: {len(grid_data)} 项")
+
 
 def _create_default_rules(armature):
     """为指定 armature 创建当前版本的默认规则"""
@@ -716,6 +816,9 @@ def _create_default_rules(armature):
     rule_other.version = CURRENT_RULES_VERSION
     
     print(f"[DEBUG] 已为 {armature.name} 创建 {len(rules)} 个默认规则 (版本 {CURRENT_RULES_VERSION})")
+    
+    # 规则迁移后重建 grid_data，确保所有 item 的 rule_index 指向新规则
+    _rebuild_grid_after_rule_migration(armature)
 
 def initialize_default_split_rules():
     """为所有 armature 初始化默认 split rules，检测版本并迁移旧规则"""
@@ -804,6 +907,57 @@ def initialize_default_split_rules():
         traceback.print_exc()
     
     print("=== [DEBUG] initialize_default_split_rules 结束 ===\n")
+    
+    # 无论是否迁移，都需要验证 grid_data 的 rule_index 是否指向当前规则
+    # 迁移后旧 item 的 rule_index 可能指向已删除的旧规则，导致计算 row 时产生空行
+    try:
+        _validate_and_fix_grid_rule_indices()
+    except Exception as e:
+        print(f"[ERROR] _validate_and_fix_grid_rule_indices 异常: {e}")
+        import traceback
+        traceback.print_exc()
+
+
+def _validate_and_fix_grid_rule_indices():
+    """验证并修复所有 grid_data item 的 rule_index，确保指向当前有效规则。
+    
+    与 AMAZING_RIGGING_OT_init_data 的逻辑一致：
+    - 如果 grid_data 与 bone collections 不匹配，调用 _rebuild_grid_after_rule_migration 重建
+    - _rebuild_grid_after_rule_migration 使用骨骼名称匹配规则前缀/精确匹配
+    """
+    print(f"\n=== [DEBUG] _validate_and_fix_grid_rule_indices 开始 ===")
+    for armature in bpy.data.armatures:
+        if not hasattr(armature, "amazing_grid_data") or not hasattr(armature, "collections"):
+            print(f"[DEBUG] 跳过 {armature.name}: 缺少必要属性")
+            continue
+        
+        grid_data = armature.amazing_grid_data
+        rules = armature.amazing_split_rules
+        
+        if not grid_data or len(grid_data) == 0 or not rules or len(rules) == 0:
+            print(f"[DEBUG] 跳过 {armature.name}: grid_data 或 rules 为空")
+            continue
+        
+        print(f"[DEBUG] 验证 {armature.name}: grid_data={len(grid_data)} 项, rules={len(rules)} 个")
+        
+        # 收集所有 bone collection 名称
+        all_col_names = {bc.name for bc in armature.collections}
+        
+        # 收集 grid 中已有的 collection 名称
+        grid_col_names = {item.name for item in grid_data}
+        
+        print(f"[DEBUG] {armature.name} bone collections: {all_col_names}")
+        print(f"[DEBUG] {armature.name} grid items: {grid_col_names}")
+        
+        # 如果 grid 中有不在当前 bone collections 中的 item，或者
+        # 有 bone collections 不在 grid 中，说明需要重建
+        if all_col_names != grid_col_names:
+            print(f"[DEBUG] grid_data 与 bone collections 不匹配，重建 {armature.name} 的 grid_data")
+            print(f"[DEBUG]   缺少: {all_col_names - grid_col_names}")
+            print(f"[DEBUG]   多余: {grid_col_names - all_col_names}")
+            _rebuild_grid_after_rule_migration(armature)
+        else:
+            print(f"[DEBUG] {armature.name} 的 grid_data 与 bone collections 匹配，无需重建")
 
 
 # 注册类列表

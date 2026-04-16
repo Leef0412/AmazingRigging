@@ -1,0 +1,14 @@
+[package]
+id = "amazing_rigging"
+label = "Amazing Rigging"
+type = "add-on"
+blender_version_min = "5.0.0"
+license = ["SPDX:GPL-3.0-or-later"]
+website = "https://github.com/lifang/AmazingRigging"
+tagline = "Bone Collection visual management and rigging workflow tool"
+maintainer = "Li Fang <lifang@example.com>"
+schema_version = 1
+version = "1.0.0"
+
+[permissions]
+files = "Read and write armature data"
