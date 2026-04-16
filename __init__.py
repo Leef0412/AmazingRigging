@@ -198,13 +198,14 @@ def on_collection_rename_for_armature(old_names, new_names, obj):
             new_name = list(added_names)[0]
             print(f"\n检测到重命名: '{old_name}' -> '{new_name}'")
 
-            # 更新所有匹配的 item.name
+            # 更新所有匹配的 item.name 和 item.note
             items_updated = []
             for item in grid_data:
                 print(f"\n检查 item: name='{item.name}', row={item.row}, col={item.col}, note='{item.note}'")
                 if item.name == old_name:
                     print(f"  -> 匹配! 更新: '{item.name}' -> '{new_name}'")
                     item.name = new_name
+                    item.note = new_name  # 同步更新 note 字段
                     items_updated.append(item)
                 else:
                     print(f"  -> 不匹配，跳过")
@@ -214,6 +215,7 @@ def on_collection_rename_for_armature(old_names, new_names, obj):
                 if item.name == old_name:
                     print(f"  - 匹配! 更新: '{item.name} -> '{new_name}'")
                     item.name = new_name
+                    item.note = new_name  # 同步更新 note 字段
                     items_updated.append(item)
                 else:
                     print(f"  - 不匹配，跳过")
