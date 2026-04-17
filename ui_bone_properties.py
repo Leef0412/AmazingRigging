@@ -235,8 +235,11 @@ class AMAZING_RIGGING_MT_bone_selection(Menu):
             layout.label(text="No target armature selected", icon='INFO')
             return
 
-        # 显示 target armature 的所有骨骼，不排除任何 bone
-        for bone in arm_obj.data.bones:
+        # 按字母顺序排序骨骼列表
+        sorted_bones = sorted(arm_obj.data.bones, key=lambda b: b.name)
+        
+        # 显示 target armature 的所有骨骼
+        for bone in sorted_bones:
             op = layout.operator("amazing_rigging.select_bone", text=bone.name, icon='BONE_DATA')
             op.bone_name = bone.name
 

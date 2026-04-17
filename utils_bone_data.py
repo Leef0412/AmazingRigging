@@ -29,6 +29,18 @@ INTERNAL_KEYS = {
 }
 
 
+def sort_bones_alphabetical(bones):
+    """按字母顺序排序骨骼列表
+    
+    Args:
+        bones: Blender bones 集合或列表
+    
+    Returns:
+        按字母顺序排序的骨骼列表
+    """
+    return sorted(bones, key=lambda b: b.name)
+
+
 def get_pose_bone(obj, bone_name):
     """获取 PoseBone 对象"""
     if not obj or obj.type != 'ARMATURE' or not bone_name:

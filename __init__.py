@@ -623,7 +623,8 @@ def delayed_initialize():
 # 版本 1: Ctrl Bones / Other (Deform Bones)
 # 版本 2: Controller, Settings, Support & MCH, Deform, Other (5个规则)
 # 版本 3: Controller, Data Flow, MCH & Clac, Settings & Val, Visual & Props, Other (6个规则)
-CURRENT_RULES_VERSION = 3
+# 版本 4: Controller (移除 TWEAK-), Data Flow (添加 TWK-)
+CURRENT_RULES_VERSION = 4
 
 
 def _rebuild_grid_after_rule_migration(armature):
@@ -769,7 +770,7 @@ def _create_default_rules(armature):
     rule1.name = "Controller"
     rule1.is_hidden = False
     rule1.version = CURRENT_RULES_VERSION
-    for prefix in ("CTRL-", "FK-", "TWEAK-", "WGT-"):
+    for prefix in ("CTRL-", "FK-", "WGT-"):
         p = rule1.prefixes.add()
         p.value = prefix
 
@@ -778,7 +779,7 @@ def _create_default_rules(armature):
     rule2.name = "Data Flow"
     rule2.is_hidden = False
     rule2.version = CURRENT_RULES_VERSION
-    for prefix in ("DEF-", "ORG-", "COR-", "FAN-", "PSD-", "SWITCH-", "IK-"):
+    for prefix in ("DEF-", "ORG-", "COR-", "FAN-", "PSD-", "SWITCH-", "IK-", "TWK-"):
         p = rule2.prefixes.add()
         p.value = prefix
 
