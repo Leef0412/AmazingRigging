@@ -3,6 +3,8 @@ from bpy.types import Panel, Operator
 from bpy.props import StringProperty, IntProperty
 from datetime import datetime
 from . import utils_bone_data
+from . import utils_set_bone_config
+from .ui_bone_properties import get_sorted_bones_for_armature
 
 _last_pose_armature = None
 
@@ -11,6 +13,9 @@ _ui_panel_rule_hidden = {}  # {armature_data_name_rule_idx: is_hidden}
 
 # Independent fold state for pockets per rule (not shared across rules)
 _ui_panel_pocket_hidden = {}  # {armature_data_name_rule_idx_pocket_row: is_hidden}
+
+# IK/FK Settings panel fold state
+_ik_fk_settings_hidden = {}  # {bone_name: is_hidden}
 
 class AMAZING_RIGGING_OT_toggle_ui_panel_rule(Operator):
     bl_idname = "armature.amazing_rigging_toggle_ui_panel_rule"
@@ -58,6 +63,28 @@ class AMAZING_RIGGING_OT_toggle_ui_panel_pocket(Operator):
 
         status = "expanded" if current_hidden else "collapsed"
         self.report({'INFO'}, f"Pocket {self.pocket_row} in rule {self.rule_index} {status}")
+        return {'FINISHED'}
+
+
+class AMAZING_RIGGING_OT_toggle_ik_fk_settings(Operator):
+    """Toggle IK/FK Settings panel visibility"""
+    bl_idname = "armature.amazing_rigging_toggle_ik_fk_settings"
+    bl_label = "Toggle IK/FK Settings"
+    bl_description = "Toggle IK/FK Settings panel visibility"
+    bl_options = {'INTERNAL'}
+
+    bone_name: StringProperty()
+
+    def execute(self, context):
+        global _ik_fk_settings_hidden
+        current_hidden = _ik_fk_settings_hidden.get(self.bone_name, False)
+        _ik_fk_settings_hidden[self.bone_name] = not current_hidden
+
+        for area in context.screen.areas:
+            area.tag_redraw()
+
+        status = "expanded" if current_hidden else "collapsed"
+        self.report({'INFO'}, f"IK/FK Settings {status}")
         return {'FINISHED'}
 
 class AMAZING_RIGGING_OT_toggle_bone_collection(Operator):
@@ -416,6 +443,156 @@ def _draw_custom_properties(layout, context, armature):
         else:
             row.label(text=f"{key}: {str(value)}")
 
+
+def _draw_ik_fk_snap_ui(layout, context, pose_bone):
+    """绘制 IK/FK Snap 按钮区域
+    
+    只在选中的骨骼是有效的 SET- 骨骼且具有 IK/FK 配置时显示。
+    
+    Args:
+        layout: UI layout
+        context: Blender context
+        pose_bone: 当前选中的 PoseBone
+    """
+    # 检查骨骼名称是否以 SET- 开头
+    if not pose_bone.name.startswith("SET-"):
+        return
+    
+    # 获取 SET- 骨骼的 UI 状态
+    set_ui = pose_bone.amazing_set_bone_ui
+    
+    # 检查 UI 中是否已设置 IK 和 FK 的 armature 和 bone
+    ik_has_config = set_ui.ik.armature and set_ui.ik.bone
+    fk_has_config = set_ui.fk.armature and set_ui.fk.bone
+    
+    # 如果 UI 中没有配置,尝试从持久化配置加载
+    if not ik_has_config or not fk_has_config:
+        ik_config = utils_set_bone_config.load_set_bone_config(pose_bone, 'ik')
+        fk_config = utils_set_bone_config.load_set_bone_config(pose_bone, 'fk')
+        
+        # 只有当 IK 和 FK 配置都有效时才显示 Snap 按钮
+        if not ik_config["valid"] or not fk_config["valid"]:
+            return
+    else:
+        # UI 中已有配置,验证它们是否有效
+        try:
+            ik_valid = set_ui.ik.bone in set_ui.ik.armature.data.bones if set_ui.ik.armature else False
+            fk_valid = set_ui.fk.bone in set_ui.fk.armature.data.bones if set_ui.fk.armature else False
+            
+            if not ik_valid or not fk_valid:
+                return
+        except:
+            return
+    
+    # 创建 Snap 区域
+    box = layout.box()
+    box.label(text="IK/FK Snap", icon='SNAP_ON')
+    
+    # 绘制两个 Snap 按钮
+    row = box.row(align=True)
+    row.operator("amazing_rigging.snap_fk_to_ik", text="FK -> IK", icon='CON_ROTLIMIT')
+    row.operator("amazing_rigging.snap_ik_to_fk", text="IK -> FK", icon='CONSTRAINT_BONE')
+
+
+def _draw_set_bone_ik_fk_ui(layout, context, pose_bone):
+    """绘制 SET- 骨骼的 IK/FK/IK CTRL 选择 UI
+    
+    Args:
+        layout: UI layout
+        context: Blender context
+        pose_bone: 当前选中的 PoseBone
+    """
+    global _ik_fk_settings_hidden
+    
+    # 检查骨骼名称是否以 SET- 开头
+    if not pose_bone.name.startswith("SET-"):
+        return
+    
+    # 获取折叠状态
+    is_hidden = _ik_fk_settings_hidden.get(pose_bone.name, False)
+    
+    # 获取 SET- 骨骼的 UI 状态
+    set_ui = pose_bone.amazing_set_bone_ui
+    
+    # 创建折叠框
+    box = layout.box()
+    
+    # 标题行,带折叠按钮和加载按钮
+    row = box.row(align=True)
+    icon_type = 'TRIA_RIGHT' if is_hidden else 'TRIA_DOWN'
+    
+    # 折叠按钮
+    toggle_op = row.operator("armature.amazing_rigging_toggle_ik_fk_settings", text="IK/FK Settings", icon=icon_type, emboss=False)
+    toggle_op.bone_name = pose_bone.name
+    
+    # 加载按钮 (仅在展开时显示)
+    if not is_hidden:
+        row.operator("amazing_rigging.load_ik_fk_config", text="", icon='FILE_REFRESH')
+    
+    # 内容 (展开时显示)
+    if not is_hidden:
+        # 绘制单个配置项的辅助函数
+        def _draw_config_section(config_type, label_text, icon, ui_config):
+            """绘制单个配置项 (IK/FK/IK CTRL)"""
+            box.label(text=label_text, icon=icon)
+
+            # 加载配置状态(只读,不写入PointerProperty)
+            config_result = utils_set_bone_config.load_set_bone_config(pose_bone, config_type)
+
+            # 确定状态图标
+            status_icon = 'NONE'
+            if config_result["config_data"] is not None:
+                if config_result["valid"]:
+                    status_icon = 'CHECKMARK'
+                else:
+                    status_icon = 'ERROR'
+
+            # 如果配置无效，清除 UI PropertyGroup 中的旧值
+            if config_result["config_data"] is not None and not config_result["valid"]:
+                global _syncing_set_ui
+                _syncing_set_ui = True
+                try:
+                    ui_config.armature = None
+                    ui_config.bone = ""
+                finally:
+                    _syncing_set_ui = False
+
+            # 绘制行
+            row = box.row(align=True)
+            row.prop(ui_config, "armature", text="")
+
+            # 状态图标
+            if status_icon != 'NONE':
+                row.label(text="", icon=status_icon)
+
+            # 清除按钮 (仅当配置有效时显示)
+            if config_result["valid"]:
+                op = row.operator("amazing_rigging.clear_ik_fk_config", text="", icon='X')
+                op.config_type = config_type
+
+            # 骨骼选择器
+            row = box.row(align=True)
+            if ui_config.armature:
+                sorted_bones = get_sorted_bones_for_armature(ui_config.armature)
+                if sorted_bones:
+                    row.prop_search(ui_config, "bone", ui_config.armature.data, "bones", text="")
+                else:
+                    row.label(text="No bones in armature", icon='INFO')
+            else:
+                row.label(text="Select armature first", icon='INFO')
+
+            box.separator()
+        
+        # IK 选项
+        _draw_config_section('ik', "IK:", 'CONSTRAINT_BONE', set_ui.ik)
+        
+        # FK 选项
+        _draw_config_section('fk', "FK:", 'CON_ROTLIMIT', set_ui.fk)
+        
+        # IK CTRL 选项
+        _draw_config_section('ik_ctrl', "IK CTRL:", 'ARMATURE_DATA', set_ui.ik_ctrl)
+
+
 # ============================================================================
 # Panel 1: Amazing Scripts (Active Armature + Collection Options)
 # ============================================================================
@@ -481,7 +658,31 @@ class AMAZING_RIGGING_PT_rig_properties(Panel):
         if not target_armature:
             return
 
+        # 获取选中的骨骼
+        selected_pbs = context.selected_pose_bones
+        
+        if selected_pbs:
+            pose_bone = selected_pbs[0]
+            
+            # 绘制 IK/FK Snap (在 Custom Properties 上方)
+            # 支持 SET- 骨骼和 dependent 骨骼（通过 _get_set_bone_for_snap 查找）
+            from .ui_bone_properties import _get_set_bone_for_snap
+            set_bone = _get_set_bone_for_snap(pose_bone)
+            if set_bone:
+                _draw_ik_fk_snap_ui(layout, context, set_bone)
+        
+        # 绘制 Custom Properties
         _draw_custom_properties(layout, context, target_armature)
+        
+        # 绘制 IK/FK Settings (在 Custom Properties 下方)
+        # 只有直接选中 SET- 骨骼时才显示
+        if selected_pbs:
+            pose_bone = selected_pbs[0]
+            
+            if pose_bone.name.startswith("SET-"):
+                _draw_set_bone_ik_fk_ui(layout, context, pose_bone)
+        
+        # 最后绘制 Settings Bone Summary
         _draw_settings_bone_summary(layout, context, target_armature)
 
 # ============================================================================
@@ -547,6 +748,7 @@ class AMAZING_RIGGING_PT_bone_collections(Panel):
 classes = [
     AMAZING_RIGGING_OT_toggle_ui_panel_rule,
     AMAZING_RIGGING_OT_toggle_ui_panel_pocket,
+    AMAZING_RIGGING_OT_toggle_ik_fk_settings,
     AMAZING_RIGGING_OT_toggle_bone_collection,
     AMAZING_RIGGING_OT_show_all,
     AMAZING_RIGGING_OT_hide_all,

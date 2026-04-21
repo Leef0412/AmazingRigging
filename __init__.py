@@ -20,6 +20,8 @@ from . import ui_layer_editor
 from . import op_scripts
 from . import ui_bone_properties
 from . import utils_bone_data
+from . import utils_set_bone_config
+from . import utils_fk_ik_chain
 
 _msgbus_owner = object()
 
@@ -307,88 +309,216 @@ def on_collection_rename_for_armature(old_names, new_names, obj):
         _processing_collection_change = False
 
 
-def check_bone_deletions():
-    """检测骨骼删除并清理从属骨骼引用"""
+def check_bone_changes():
+    """检测骨骼删除和新增，清理从属骨骼引用，并处理镜像 SET-骨骼"""
     global _bone_names_cache, _processing_bone_deletion
-    
+
     # 避免重复执行
     if _processing_bone_deletion:
         return
-    
+
     try:
         deletion_detected = False
-        
+        mirror_candidates = []  # [(arm_obj, mirror_pb, source_pb), ...]
+
         for arm_data in bpy.data.armatures:
             arm_name = arm_data.name
-            
+
             # 获取当前骨骼名称集合
             current_bone_names = {bone.name for bone in arm_data.bones}
-            
+
             # 初始化缓存
             if arm_name not in _bone_names_cache:
                 _bone_names_cache[arm_name] = current_bone_names
                 continue
-            
+
             cached_bone_names = _bone_names_cache[arm_name]
-            
+
             # 检测删除的骨骼
             deleted_bones = cached_bone_names - current_bone_names
-            
+
+            # 检测新增的骨骼
+            added_bones = current_bone_names - cached_bone_names
+
+            # 先更新缓存（防止重入时重复检测）
+            _bone_names_cache[arm_name] = current_bone_names
+
             if deleted_bones:
                 deletion_detected = True
                 print(f"[DEBUG] 检测到骨骼删除: {arm_name} -> {deleted_bones}")
-                
-                # 更新缓存
-                _bone_names_cache[arm_name] = current_bone_names
-        
+
+            # 检测新增的镜像 SET-骨骼
+            if added_bones:
+                # 找到使用此 armature 的 object
+                arm_obj = None
+                for obj in bpy.data.objects:
+                    if obj.type == 'ARMATURE' and obj.data == arm_data:
+                        arm_obj = obj
+                        break
+
+                if arm_obj:
+                    for new_bone_name in added_bones:
+                        # 条件1: 必须是 SET- 前缀
+                        if not new_bone_name.startswith("SET-"):
+                            continue
+
+                        # 条件2: 翻转名称与原名称不同（确认有左右标识被翻转）
+                        source_name = utils_bone_data.flip_bone_name(new_bone_name)
+                        if source_name == new_bone_name:
+                            continue
+
+                        # 条件3: 源骨骼名在旧缓存中存在（排除两边都是新建的误判）
+                        if source_name not in cached_bone_names:
+                            continue
+
+                        # 条件4: 源和镜像 PoseBone 都存在
+                        source_pb = arm_obj.pose.bones.get(source_name)
+                        mirror_pb = arm_obj.pose.bones.get(new_bone_name)
+
+                        if source_pb and mirror_pb:
+                            mirror_candidates.append((arm_obj, mirror_pb, source_pb))
+                            print(f"[INFO] 检测到镜像 SET-骨骼: {source_name} -> {new_bone_name}")
+
         # 如果检测到删除，执行清理
         if deletion_detected:
+            print(f"[DEBUG] check_bone_changes: deletion_detected=True, calling cleanup_invalid_references")
             _processing_bone_deletion = True
             try:
                 cleanup_invalid_references()
             finally:
                 _processing_bone_deletion = False
-    
+
+        # 处理镜像 SET-骨骼
+        if mirror_candidates:
+            for arm_obj, mirror_pb, source_pb in mirror_candidates:
+                try:
+                    mirror_result = utils_bone_data.mirror_set_bone_data(source_pb, mirror_pb, arm_obj)
+
+                    # 输出处理结果
+                    msg_parts = []
+                    msg_parts.append(f"镜像 SET-骨骼 '{mirror_pb.name}':")
+                    msg_parts.append(f"  dependent bones: {mirror_result['dependent_mirrored']} 个已镜像")
+                    if mirror_result['dependent_missing']:
+                        msg_parts.append(f"  缺失镜像骨骼: {mirror_result['dependent_missing']}")
+                    msg_parts.append(f"  配置: {mirror_result['configs_mirrored']} 个已镜像")
+                    if mirror_result['configs_missing']:
+                        msg_parts.append(f"  缺失镜像配置骨骼: {mirror_result['configs_missing']}")
+
+                    print(f"[INFO] " + "\n".join(msg_parts))
+
+                    # 如果有缺失的镜像骨骼，在状态栏显示提示
+                    all_missing = mirror_result['dependent_missing'] + mirror_result['configs_missing']
+                    if all_missing:
+                        try:
+                            bpy.context.workspace.status_text_set(
+                                f"镜像骨骼 '{mirror_pb.name}' 完成，缺失: {', '.join(all_missing)}"
+                            )
+                            # 延迟清除状态栏文本
+                            def _clear_status():
+                                try:
+                                    bpy.context.workspace.status_text_set(None)
+                                except Exception:
+                                    pass
+                                return None
+                            bpy.app.timers.register(_clear_status, first_interval=5.0)
+                        except Exception:
+                            pass
+
+                except Exception as e:
+                    print(f"[ERROR] 镜像 SET-骨骼 '{mirror_pb.name}' 处理失败: {e}")
+                    import traceback
+                    traceback.print_exc()
+
+            # 触发 UI 刷新
+            try:
+                for area in bpy.context.screen.areas:
+                    area.tag_redraw()
+            except Exception:
+                pass
+
     except Exception as e:
-        print(f"[ERROR] check_bone_deletions 异常: {e}")
+        print(f"[ERROR] check_bone_changes 异常: {e}")
         import traceback
         traceback.print_exc()
         _processing_bone_deletion = False
 
 
 def cleanup_invalid_references():
-    """清理所有无效的 settings bone 引用（基于 PoseBone）"""
+    """清理所有无效的 settings bone 引用和孤立的 dependent entries"""
     from . import utils_bone_data
 
     try:
         cleaned_count = 0
 
+        # 第一阶段：清理 dependent list 中指向已删除骨骼的孤立条目
         for obj in bpy.data.objects:
             if obj.type != 'ARMATURE':
                 continue
+
+            for pb in obj.pose.bones:
+                dep_list = utils_bone_data.get_dependent_bones(pb)
+                if not dep_list:
+                    continue
+
+                new_dep_list = []
+                for dep in dep_list:
+                    dep_bone_name = dep.get('bone_name', '')
+                    dep_arm_name = dep.get('armature_name', '')
+                    dep_arm_uuid = dep.get('armature_uuid', '')
+
+                    # 查找 dependent bone 所属的 armature
+                    dep_arm_obj = None
+                    if dep_arm_uuid:
+                        dep_arm_obj = utils_bone_data.find_armature_obj_by_uuid(dep_arm_uuid)
+                    if not dep_arm_obj and dep_arm_name:
+                        arm_data_check = bpy.data.armatures.get(dep_arm_name)
+                        if arm_data_check:
+                            for o in bpy.data.objects:
+                                if o.type == 'ARMATURE' and o.data == arm_data_check:
+                                    dep_arm_obj = o
+                                    break
+
+                    # 检查 dependent bone 是否仍然存在
+                    if dep_arm_obj:
+                        current_dep_pb = dep_arm_obj.pose.bones.get(dep_bone_name)
+                        if current_dep_pb is not None:
+                            new_dep_list.append(dep)
+                        else:
+                            # Dependent bone 已被删除，跳过这条记录
+                            cleaned_count += 1
+                    else:
+                        # 无法找到 armature，保留这条记录
+                        new_dep_list.append(dep)
+
+                if len(new_dep_list) != len(dep_list):
+                    utils_bone_data.set_dependent_bones(pb, new_dep_list)
+
+        # 第二阶段：清理 settings_info 指向已删除骨骼的 pose bones
+        for obj in bpy.data.objects:
+            if obj.type != 'ARMATURE':
+                continue
+
             for pb in obj.pose.bones:
                 settings_info = utils_bone_data.get_settings_bone_info(pb)
-
                 if not settings_info:
                     continue
 
-                # 验证 settings bone 是否仍然存在
                 settings_pb = utils_bone_data.get_settings_bone_object(pb)
-
                 if settings_pb is None:
-                    # settings bone 已不存在，清除引用
-                    print(f"[DEBUG] 清理无效引用: {obj.name}/{pb.name} -> {settings_info['armature_name']}/{settings_info['bone_name']} (已删除)")
-                    utils_bone_data.clear_settings_bone(pb)
+                    utils_bone_data.clear_settings_bone(pb, target_bone_info=settings_info)
                     cleaned_count += 1
 
+        # 清理无效的 SET-骨骼配置
+        utils_set_bone_config.cleanup_invalid_configs()
+
         if cleaned_count > 0:
-            print(f"[DEBUG] 共清理了 {cleaned_count} 个无效的 settings bone 引用")
-            # 触发 UI 刷新
             for area in bpy.context.screen.areas:
                 area.tag_redraw()
 
     except Exception as e:
         print(f"[ERROR] cleanup_invalid_references 异常: {e}")
+        import traceback
+        traceback.print_exc()
         import traceback
         traceback.print_exc()
 
@@ -420,8 +550,14 @@ def depsgraph_update_handler(scene):
                 import traceback
                 traceback.print_exc()
         
-        # 检测骨骼删除并清理无效引用
-        check_bone_deletions()
+        # 检测骨骼变化（删除清理 + 镜像SET-骨骼处理）
+        check_bone_changes()
+        
+        # 清理无效的 SET-骨骼配置(在后台执行,不涉及UI更新)
+        try:
+            utils_set_bone_config.cleanup_invalid_configs()
+        except Exception as e:
+            print(f"[ERROR] cleanup_set_bone_configs 异常: {e}")
 
         if obj and obj.type == 'ARMATURE' and not _timer_active:
             ensure_timer_running()
@@ -552,6 +688,9 @@ def on_load_post(dummy):
         try:
             print("[DEBUG] delayed_rules_init: 开始初始化 split rules")
             initialize_default_split_rules()
+            
+            # 刷新所有 SET-骨骼配置，确保 UUID 已初始化
+            utils_set_bone_config.refresh_all_configs()
         except Exception as e:
             print(f"[ERROR] delayed_rules_init 失败: {e}")
         return None  # 只执行一次

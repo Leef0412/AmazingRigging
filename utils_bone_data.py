@@ -8,6 +8,11 @@ KEY_SETTINGS_ARMATURE = "_amazing_settings_armature"
 KEY_SETTINGS_ARMATURE_UUID = "_amazing_settings_armature_uuid"
 KEY_DEPENDENT_BONES = "_amazing_dependent_bones"
 
+# SET-骨骼 IK/FK/IK CTRL 配置键
+KEY_IK_CONFIG = "_amazing_ik_config"
+KEY_FK_CONFIG = "_amazing_fk_config"
+KEY_IK_CTRL_CONFIG = "_amazing_ik_ctrl_config"
+
 # 旧版属性键名（用于迁移）
 _KEY_SETTINGS_BONE_OLD = "amazing_settings_bone"
 _KEY_SETTINGS_ARMATURE_OLD = "amazing_settings_armature"
@@ -26,6 +31,7 @@ _MIGRATION_MAP = {
 INTERNAL_KEYS = {
     KEY_SETTINGS_BONE, KEY_SETTINGS_ARMATURE, KEY_SETTINGS_ARMATURE_UUID, KEY_DEPENDENT_BONES,
     _KEY_SETTINGS_BONE_OLD, _KEY_SETTINGS_ARMATURE_OLD, _KEY_SETTINGS_ARMATURE_UUID_OLD, _KEY_DEPENDENT_BONES_OLD,
+    KEY_IK_CONFIG, KEY_FK_CONFIG, KEY_IK_CTRL_CONFIG,
 }
 
 
@@ -52,21 +58,36 @@ def find_armature_obj_by_uuid(uuid_str):
     """通过 Armature 数据 UUID 查找场景中的 Armature 对象"""
     if not uuid_str:
         return None
+    custom_uuid_key = "_amazing_uuid"
     for obj in bpy.data.objects:
-        if obj.type == 'ARMATURE' and hasattr(obj.data, 'uuid') and obj.data.uuid == uuid_str:
+        if obj.type != 'ARMATURE':
+            continue
+        arm_data = obj.data
+        # 优先检查内置 uuid
+        if hasattr(arm_data, 'uuid') and arm_data.uuid == uuid_str:
+            return obj
+        # 检查自定义属性 UUID
+        if arm_data.get(custom_uuid_key, "") == uuid_str:
             return obj
     return None
 
 
 def get_or_create_armature_uuid(arm_data):
-    """获取或创建 armature 的 UUID"""
+    """获取或创建 armature 的 UUID（使用自定义属性存储）"""
     if not arm_data:
         return ""
 
+    # 优先使用 Blender 内置的 uuid 属性（如果可用）
     current_uuid = getattr(arm_data, 'uuid', '')
+    if current_uuid:
+        return current_uuid
+
+    # 否则使用自定义属性存储 UUID
+    custom_uuid_key = "_amazing_uuid"
+    current_uuid = arm_data.get(custom_uuid_key, "")
     if not current_uuid:
-        arm_data.uuid = str(uuid.uuid4())
-        current_uuid = arm_data.uuid
+        current_uuid = str(uuid.uuid4())
+        arm_data[custom_uuid_key] = current_uuid
 
     return current_uuid
 
@@ -76,10 +97,30 @@ def find_armature_by_uuid(uuid_str):
     if not uuid_str:
         return None
 
+    custom_uuid_key = "_amazing_uuid"
     for arm in bpy.data.armatures:
-        if getattr(arm, 'uuid', '') == uuid_str:
+        # 优先检查内置 uuid
+        if hasattr(arm, 'uuid') and arm.uuid == uuid_str:
+            return arm
+        # 检查自定义属性 UUID
+        if arm.get(custom_uuid_key, "") == uuid_str:
             return arm
     return None
+
+
+def flip_bone_name(name):
+    """翻转骨骼名称的左右标识 (.L ↔ .R)
+
+    使用 bpy.utils.flip_name() 处理标准命名规范（.L/.R, _L/_R, Left/Right 等）。
+    如果名称没有左右标识，返回原名称不变。
+
+    Args:
+        name: 骨骼名称
+
+    Returns:
+        翻转后的骨骼名称，或原名称（无左右标识时）
+    """
+    return bpy.utils.flip_name(name)
 
 
 def _parse_dependent_bones(pose_bone):
@@ -154,15 +195,31 @@ def _remove_dependent_bone(target_bone_info, source_pose_bone, target_pose_bone=
 
     # 获取从属骨骼所属 armature 的 UUID
     source_arm_uuid = ""
+    source_arm_name = ""
     if hasattr(source_pose_bone, 'id_data') and source_pose_bone.id_data:
         source_arm_uuid = get_or_create_armature_uuid(source_pose_bone.id_data.data)
+        source_arm_name = source_pose_bone.id_data.name
 
     # 移除匹配的记录
-    filtered_list = [
-        entry for entry in dependent_list
-        if not (entry.get("bone_name") == source_pose_bone.name and
-                entry.get("armature_uuid") == source_arm_uuid)
-    ]
+    # 匹配条件：bone_name 相同，且 (UUID 相同 或 name 相同)
+    filtered_list = []
+    for entry in dependent_list:
+        bone_match = entry.get("bone_name") == source_pose_bone.name
+        uuid_match = entry.get("armature_uuid") == source_arm_uuid
+        name_match = entry.get("armature_name") == source_arm_name
+
+        # 需要移除的条件：bone_match 为 True，且 (uuid_match 或 name_match)
+        should_remove = False
+        if bone_match:
+            if uuid_match:
+                # UUID 完全匹配
+                should_remove = True
+            elif name_match:
+                # UUID 不匹配但 name 匹配（可能是旧数据或 UUID 未初始化）
+                should_remove = True
+
+        if not should_remove:
+            filtered_list.append(entry)
 
     if len(filtered_list) != len(dependent_list):
         target_pose_bone[KEY_DEPENDENT_BONES] = _serialize_dependent_bones(filtered_list)
@@ -306,6 +363,15 @@ def get_dependent_bones(pose_bone):
     return _parse_dependent_bones(pose_bone)
 
 
+def set_dependent_bones(pose_bone, dependent_list):
+    """设置主导骨骼的从属骨骼列表（替换整个列表）"""
+    if not dependent_list:
+        if KEY_DEPENDENT_BONES in pose_bone:
+            del pose_bone[KEY_DEPENDENT_BONES]
+        return
+    pose_bone[KEY_DEPENDENT_BONES] = _serialize_dependent_bones(dependent_list)
+
+
 def cleanup_dependent_bones(master_pose_bone, master_arm_obj=None):
     """
     当主导骨骼被删除时，清理所有从属骨骼的设置
@@ -364,6 +430,123 @@ def cleanup_dependent_bones(master_pose_bone, master_arm_obj=None):
                 cleaned_count += 1
 
     return cleaned_count
+
+
+def mirror_set_bone_data(source_pb, mirror_pb, arm_obj):
+    """处理镜像 SET-骨骼的依赖关系数据
+
+    当用户对 SET-骨骼执行 Symmetrize 操作后，Blender 会复制所有自定义属性到镜像骨骼，
+    导致镜像骨骼的 dependent bones 和 configs 引用了错误侧的数据。此函数修复这些问题：
+
+    1. 清除镜像骨骼的错误 dependent bones 列表（从源骨骼复制来的旧数据）
+    2. 遍历源骨骼的 dependent bones，为每个找到对应的镜像骨骼并建立正确的双向引用
+    3. 镜像 IK/FK/IK_CTRL 配置
+
+    Args:
+        source_pb: 源 SET- PoseBone (如 SET-Leg.L)
+        mirror_pb: 镜像 SET- PoseBone (如 SET-Leg.R)
+        arm_obj: 骨骼所属的 armature 对象
+
+    Returns:
+        dict: {
+            'dependent_mirrored': int,       # 成功镜像的 dependent bones 数量
+            'dependent_missing': list[str],  # 找不到对应镜像的骨骼名称列表
+            'configs_mirrored': int,         # 成功镜像的配置数量
+            'configs_missing': list[str],    # 配置中找不到对应镜像的骨骼名称列表
+        }
+    """
+    result = {
+        'dependent_mirrored': 0,
+        'dependent_missing': [],
+        'configs_mirrored': 0,
+        'configs_missing': [],
+    }
+
+    # ── Step 1: 清除镜像骨骼的错误 dependent list ──
+    if KEY_DEPENDENT_BONES in mirror_pb:
+        del mirror_pb[KEY_DEPENDENT_BONES]
+    if _KEY_DEPENDENT_BONES_OLD in mirror_pb:
+        del mirror_pb[_KEY_DEPENDENT_BONES_OLD]
+
+    # ── Step 2: 遍历源 dependent bones，建立镜像侧的正确引用 ──
+    source_dependents = _parse_dependent_bones(source_pb)
+
+    for dep_entry in source_dependents:
+        dep_bone_name = dep_entry.get('bone_name', '')
+        dep_arm_uuid = dep_entry.get('armature_uuid', '')
+        dep_arm_name = dep_entry.get('armature_name', '')
+
+        if not dep_bone_name:
+            continue
+
+        # 翻转骨骼名称
+        mirrored_dep_name = flip_bone_name(dep_bone_name)
+
+        # 如果翻转后名称相同（无左右标识），跳过此条目
+        if mirrored_dep_name == dep_bone_name:
+            continue
+
+        # 查找 dependent bone 所属的 armature 对象
+        dep_arm_obj = None
+        if dep_arm_uuid:
+            dep_arm_obj = find_armature_obj_by_uuid(dep_arm_uuid)
+        if not dep_arm_obj and dep_arm_name:
+            arm_data = bpy.data.armatures.get(dep_arm_name)
+            if arm_data:
+                for obj in bpy.data.objects:
+                    if obj.type == 'ARMATURE' and obj.data == arm_data:
+                        dep_arm_obj = obj
+                        break
+
+        if not dep_arm_obj:
+            result['dependent_missing'].append(mirrored_dep_name)
+            print(f"[WARNING] 镜像 dependent bone: 骨骼 '{mirrored_dep_name}' 的 armature 未找到，跳过")
+            continue
+
+        # 查找镜像 dependent PoseBone
+        mirrored_dep_pb = dep_arm_obj.pose.bones.get(mirrored_dep_name)
+
+        if mirrored_dep_pb:
+            # 清除镜像 dependent bone 的旧引用（指向源 SET-骨骼）
+            clear_settings_bone(mirrored_dep_pb)
+
+            # 建立正确的双向引用：镜像 dependent → 镜像 SET-骨骼
+            set_settings_bone(
+                mirrored_dep_pb, mirror_pb.name, arm_obj,
+                source_arm_obj=dep_arm_obj, source_pose_bone=mirrored_dep_pb,
+                target_pose_bone=mirror_pb
+            )
+            result['dependent_mirrored'] += 1
+            print(f"[INFO] 镜像 dependent bone: {dep_bone_name} -> {mirrored_dep_name}")
+        else:
+            result['dependent_missing'].append(mirrored_dep_name)
+            print(f"[WARNING] 镜像 dependent bone: 骨骼 '{mirrored_dep_name}' 不存在，跳过")
+
+    # ── Step 3: 镜像 IK/FK/IK_CTRL 配置 ──
+    from . import utils_set_bone_config
+    config_result = utils_set_bone_config.mirror_set_bone_configs(source_pb, mirror_pb, arm_obj)
+    result['configs_mirrored'] = config_result['mirrored']
+    result['configs_missing'] = config_result['missing']
+
+    # ── Step 4: 同步镜像骨骼的 UI PropertyGroup ──
+    # Symmetrize 会将源骨骼的 PropertyGroup 原样复制到镜像骨骼，
+    # 导致 UI 仍显示 .L 后缀的骨骼名称。
+    # 直接使用已知的 arm_obj 和镜像后的 bone_name 来设置 PropertyGroup。
+    from . import ui_bone_properties
+    from . import utils_set_bone_config as usc
+    ui_bone_properties._syncing_set_ui = True
+    try:
+        mirror_set_ui = mirror_pb.amazing_set_bone_ui
+        for config_type in [usc.CONFIG_IK, usc.CONFIG_FK, usc.CONFIG_IK_CTRL]:
+            ui_target = getattr(mirror_set_ui, config_type)
+            # 从持久化数据获取 bone_name，使用已知的 arm_obj 作为 armature
+            cfg_result = usc.load_set_bone_config(mirror_pb, config_type)
+            ui_target.armature = arm_obj
+            ui_target.bone = cfg_result["bone_name"] if cfg_result["bone_name"] else ""
+    finally:
+        ui_bone_properties._syncing_set_ui = False
+
+    return result
 
 
 def has_settings_bone(pose_bone):
