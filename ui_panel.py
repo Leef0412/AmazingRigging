@@ -444,50 +444,105 @@ def _draw_custom_properties(layout, context, armature):
             row.label(text=f"{key}: {str(value)}")
 
 
+def _get_set_bone_for_snap_check(pose_bone):
+    """
+    获取用于 IK/FK Snap 按钮可见性检查的 SET- 骨骼
+
+    逻辑:
+    1. 如果当前骨骼是 SET- 骨骼,直接返回
+    2. 如果当前骨骼是 dependent bone (有 settings bone),且 settings bone 是 SET- 骨骼,返回 settings bone
+    3. 否则返回 None
+
+    Args:
+        pose_bone: PoseBone 对象
+
+    Returns:
+        PoseBone 或 None
+    """
+    if pose_bone.name.startswith("SET-"):
+        return pose_bone
+
+    settings_info = utils_bone_data.get_settings_bone_info(pose_bone)
+    if settings_info:
+        target_pose_bone = utils_bone_data.get_settings_bone_object(pose_bone)
+        if target_pose_bone and target_pose_bone.name.startswith("SET-"):
+            return target_pose_bone
+
+    return None
+
+
+def _is_ik_fk_config_valid(set_bone):
+    """
+    检查 SET- 骨骼的 IK/FK 配置是否有效
+
+    当配置失效时，清除持久化配置，确保 UI 能正确显示待选择状态。
+
+    Args:
+        set_bone: SET- PoseBone
+
+    Returns:
+        bool: True if both IK and FK configs are valid
+    """
+    set_ui = set_bone.amazing_set_bone_ui
+
+    ik_has_config = set_ui.ik.armature and set_ui.ik.bone
+    fk_has_config = set_ui.fk.armature and set_ui.fk.bone
+
+    if not ik_has_config or not fk_has_config:
+        ik_config = utils_set_bone_config.load_set_bone_config(set_bone, 'ik')
+        fk_config = utils_set_bone_config.load_set_bone_config(set_bone, 'fk')
+
+        ik_valid = bool(ik_config["valid"])
+        fk_valid = bool(fk_config["valid"])
+
+        # 清除失效的持久化配置
+        if not ik_valid and ik_config["config_data"] is not None:
+            utils_set_bone_config.clear_set_bone_config(set_bone, 'ik')
+        if not fk_valid and fk_config["config_data"] is not None:
+            utils_set_bone_config.clear_set_bone_config(set_bone, 'fk')
+
+        return ik_valid and fk_valid
+    else:
+        try:
+            ik_valid = set_ui.ik.bone in set_ui.ik.armature.data.bones if set_ui.ik.armature else False
+            fk_valid = set_ui.fk.bone in set_ui.fk.armature.data.bones if set_ui.fk.armature else False
+
+            # 清除失效的持久化配置
+            if not ik_valid:
+                utils_set_bone_config.clear_set_bone_config(set_bone, 'ik')
+            if not fk_valid:
+                utils_set_bone_config.clear_set_bone_config(set_bone, 'fk')
+
+            return bool(ik_valid and fk_valid)
+        except:
+            return False
+
+
 def _draw_ik_fk_snap_ui(layout, context, pose_bone):
     """绘制 IK/FK Snap 按钮区域
-    
-    只在选中的骨骼是有效的 SET- 骨骼且具有 IK/FK 配置时显示。
-    
+
+    只在以下情况显示:
+    1. 选中的骨骼是 SET- 骨骼且 IK/FK 配置有效
+    2. 选中的骨骼是 dependent bone 且其 SET- 骨骼的 IK/FK 配置有效
+
     Args:
         layout: UI layout
         context: Blender context
         pose_bone: 当前选中的 PoseBone
     """
-    # 检查骨骼名称是否以 SET- 开头
-    if not pose_bone.name.startswith("SET-"):
+    # 检查是否是 SET- 骨骼或是 SET- 骨骼的 dependent bone
+    set_bone = _get_set_bone_for_snap_check(pose_bone)
+    if not set_bone:
         return
-    
-    # 获取 SET- 骨骼的 UI 状态
-    set_ui = pose_bone.amazing_set_bone_ui
-    
-    # 检查 UI 中是否已设置 IK 和 FK 的 armature 和 bone
-    ik_has_config = set_ui.ik.armature and set_ui.ik.bone
-    fk_has_config = set_ui.fk.armature and set_ui.fk.bone
-    
-    # 如果 UI 中没有配置,尝试从持久化配置加载
-    if not ik_has_config or not fk_has_config:
-        ik_config = utils_set_bone_config.load_set_bone_config(pose_bone, 'ik')
-        fk_config = utils_set_bone_config.load_set_bone_config(pose_bone, 'fk')
-        
-        # 只有当 IK 和 FK 配置都有效时才显示 Snap 按钮
-        if not ik_config["valid"] or not fk_config["valid"]:
-            return
-    else:
-        # UI 中已有配置,验证它们是否有效
-        try:
-            ik_valid = set_ui.ik.bone in set_ui.ik.armature.data.bones if set_ui.ik.armature else False
-            fk_valid = set_ui.fk.bone in set_ui.fk.armature.data.bones if set_ui.fk.armature else False
-            
-            if not ik_valid or not fk_valid:
-                return
-        except:
-            return
-    
+
+    # 检查 IK/FK 配置是否有效
+    if not _is_ik_fk_config_valid(set_bone):
+        return
+
     # 创建 Snap 区域
     box = layout.box()
     box.label(text="IK/FK Snap", icon='SNAP_ON')
-    
+
     # 绘制两个 Snap 按钮
     row = box.row(align=True)
     row.operator("amazing_rigging.snap_fk_to_ik", text="FK -> IK", icon='CON_ROTLIMIT')
@@ -533,11 +588,19 @@ def _draw_set_bone_ik_fk_ui(layout, context, pose_bone):
     if not is_hidden:
         # 绘制单个配置项的辅助函数
         def _draw_config_section(config_type, label_text, icon, ui_config):
-            """绘制单个配置项 (IK/FK/IK CTRL)"""
+            """绘制单个配置项 (IK/FK/IK CTRL)
+
+            当配置无效（骨骼被删除）时:
+            - armature 保留显示（不清空）
+            - bone 显示空（不显示已删除的骨骼名）
+            - 显示 ERROR 图标
+            """
             box.label(text=label_text, icon=icon)
 
             # 加载配置状态(只读,不写入PointerProperty)
             config_result = utils_set_bone_config.load_set_bone_config(pose_bone, config_type)
+
+            print(f"[DEBUG] _draw_config_section {config_type}: config_data={'exists' if config_result['config_data'] is not None else 'None'}, armature_obj={config_result['armature_obj']}, valid={config_result['valid']}, ui_config.armature={ui_config.armature}, ui_config.bone={ui_config.bone}")
 
             # 确定状态图标
             status_icon = 'NONE'
@@ -546,18 +609,33 @@ def _draw_set_bone_ik_fk_ui(layout, context, pose_bone):
                     status_icon = 'CHECKMARK'
                 else:
                     status_icon = 'ERROR'
-
-            # 如果配置无效，清除 UI PropertyGroup 中的旧值
-            if config_result["config_data"] is not None and not config_result["valid"]:
-                global _syncing_set_ui
-                _syncing_set_ui = True
-                try:
-                    ui_config.armature = None
+                    # 配置无效（骨骼被删除）时，清空 ui_config.bone，防止显示已删除的骨骼名
                     ui_config.bone = ""
-                finally:
-                    _syncing_set_ui = False
 
-            # 绘制行
+            # 获取当前应该使用的 armature
+            if config_result["config_data"] is not None:
+                # 有配置数据，使用配置中的 armature
+                current_armature = config_result["armature_obj"] if config_result["armature_obj"] else ui_config.armature
+            else:
+                # 没有配置数据（用户从未配置或已清除），UI 保持原样让用户选择
+                current_armature = ui_config.armature if ui_config.armature else None
+
+            # 验证 current_armature 是否有效
+            # 如果无效引用，清空 PointerProperty 防止下拉菜单无法工作
+            armature_valid = False
+            try:
+                if current_armature is not None:
+                    if current_armature.name in bpy.data.objects and current_armature.type == 'ARMATURE':
+                        armature_valid = True
+                    else:
+                        # 无效引用，清空 PointerProperty
+                        ui_config.armature = None
+                        current_armature = None
+                        armature_valid = False
+            except:
+                pass
+
+            # 绘制 armature 选择器
             row = box.row(align=True)
             row.prop(ui_config, "armature", text="")
 
@@ -565,17 +643,17 @@ def _draw_set_bone_ik_fk_ui(layout, context, pose_bone):
             if status_icon != 'NONE':
                 row.label(text="", icon=status_icon)
 
-            # 清除按钮 (仅当配置有效时显示)
-            if config_result["valid"]:
+            # 清除按钮 (仅当配置存在时显示)
+            if config_result["config_data"] is not None:
                 op = row.operator("amazing_rigging.clear_ik_fk_config", text="", icon='X')
                 op.config_type = config_type
 
-            # 骨骼选择器
+            # 绘制 bone 选择器
             row = box.row(align=True)
-            if ui_config.armature:
-                sorted_bones = get_sorted_bones_for_armature(ui_config.armature)
+            if armature_valid and current_armature:
+                sorted_bones = get_sorted_bones_for_armature(current_armature)
                 if sorted_bones:
-                    row.prop_search(ui_config, "bone", ui_config.armature.data, "bones", text="")
+                    row.prop_search(ui_config, "bone", current_armature.data, "bones", text="")
                 else:
                     row.label(text="No bones in armature", icon='INFO')
             else:

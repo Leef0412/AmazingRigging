@@ -381,10 +381,28 @@ def check_bone_changes():
 
         # 如果检测到删除，执行清理
         if deletion_detected:
-            print(f"[DEBUG] check_bone_changes: deletion_detected=True, calling cleanup_invalid_references")
+            print(f"[DEBUG] check_bone_changes: deletion_detected=True, syncing SET-bone UI")
             _processing_bone_deletion = True
             try:
+                # 先同步所有 SET-骨骼的 IK/FK/IK Ctrl UI
+                # sync_set_bone_ui 会检测到 config_data 存在但 valid=False 的情况（case 2）
+                # 然后清空 UI 和持久化配置
+                for obj in bpy.data.objects:
+                    if obj.type != 'ARMATURE':
+                        continue
+                    for pb in obj.pose.bones:
+                        if pb.name.startswith("SET-"):
+                            try:
+                                utils_set_bone_config.sync_set_bone_ui(bpy.context, pb)
+                            except Exception as e:
+                                print(f"[ERROR] sync_set_bone_ui for {pb.name} failed: {e}")
+
+                # 再清理无效的 settings bone 引用（dependent bones 清理）
                 cleanup_invalid_references()
+
+                # 刷新 UI
+                for area in bpy.context.screen.areas:
+                    area.tag_redraw()
             finally:
                 _processing_bone_deletion = False
 
@@ -508,8 +526,8 @@ def cleanup_invalid_references():
                     utils_bone_data.clear_settings_bone(pb, target_bone_info=settings_info)
                     cleaned_count += 1
 
-        # 清理无效的 SET-骨骼配置
-        utils_set_bone_config.cleanup_invalid_configs()
+        # 不再自动清理 SET-骨骼配置
+        # 配置的清理由 sync_set_bone_ui 在选择 SET-骨骼时处理
 
         if cleaned_count > 0:
             for area in bpy.context.screen.areas:
@@ -552,12 +570,6 @@ def depsgraph_update_handler(scene):
         
         # 检测骨骼变化（删除清理 + 镜像SET-骨骼处理）
         check_bone_changes()
-        
-        # 清理无效的 SET-骨骼配置(在后台执行,不涉及UI更新)
-        try:
-            utils_set_bone_config.cleanup_invalid_configs()
-        except Exception as e:
-            print(f"[ERROR] cleanup_set_bone_configs 异常: {e}")
 
         if obj and obj.type == 'ARMATURE' and not _timer_active:
             ensure_timer_running()

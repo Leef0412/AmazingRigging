@@ -91,7 +91,10 @@ def sync_ui_to_selected_bone(scene):
     global _last_synced_bone, _syncing_ui
     current_bone_key = (arm_data.name, bone_name) if bone_name else None
 
-    if current_bone_key == _last_synced_bone:
+    # SET-骨骼总是需要同步，因为IK/FK配置有效性可能在变化（如关联骨骼被删除）
+    is_set_bone = bone_name.startswith("SET-") if bone_name else False
+
+    if current_bone_key == _last_synced_bone and not is_set_bone:
         return
 
     _last_synced_bone = current_bone_key
@@ -233,41 +236,57 @@ class AMAZING_RIGGING_PG_settings_bone_ui(PropertyGroup):
 # IK/FK Bone Selection Properties
 
 def _on_ik_fk_armature_changed(self, context):
-    """当 IK/FK/IK CTRL 的 armature 改变时，清空 bone 并保存配置"""
+    """当 IK/FK/IK CTRL 的 armature 改变时，清空 bone"""
     global _syncing_set_ui
-    
+
+    print(f"[DEBUG] _on_ik_fk_armature_changed called, _syncing_set_ui={_syncing_set_ui}")
+
     if _syncing_set_ui:
+        print("[DEBUG] _on_ik_fk_armature_changed: early return due to _syncing_set_ui")
         return
-    
+
+    # 获取当前 armature 值
+    armature_obj = getattr(self, 'armature', None)
+    print(f"[DEBUG] _on_ik_fk_armature_changed: armature_obj={armature_obj}")
+
     obj = context.active_object
     if not obj or obj.type != 'ARMATURE' or obj.mode != 'POSE':
+        print("[DEBUG] _on_ik_fk_armature_changed: early return - not in POSE mode")
         return
-    
-    # 获取所属的 PoseBone
-    pose_bone = self.id_data
-    if not hasattr(pose_bone, 'name'):
+
+    # 获取当前选中的 PoseBone
+    pose_bone = context.active_pose_bone
+    if not pose_bone:
+        print("[DEBUG] _on_ik_fk_armature_changed: no active_pose_bone")
         return
-    
-    # 只处理 SET- 骨骼
+
     if not pose_bone.name.startswith("SET-"):
+        print(f"[DEBUG] _on_ik_fk_armature_changed: {pose_bone.name} not SET- bone")
         return
-    
-    # 获取配置类型 (ik/fk/ik_ctrl)
-    path = self.path_from_id()
-    config_type = path.split('.')[0] if '.' in path else None
-    if config_type not in ['ik', 'fk', 'ik_ctrl']:
+
+    # 获取 config_type：检查 self 是 ik/fk/ik_ctrl 中的哪一个
+    set_ui = pose_bone.amazing_set_bone_ui
+    config_type = None
+    if self is set_ui.ik:
+        config_type = 'ik'
+    elif self is set_ui.fk:
+        config_type = 'fk'
+    elif self is set_ui.ik_ctrl:
+        config_type = 'ik_ctrl'
+
+    print(f"[DEBUG] _on_ik_fk_armature_changed: config_type={config_type}")
+    if config_type is None:
         return
-    
-    # 清空 bone 字段
+
+    # 清空 bone 字段（armature 改变时，旧的 bone 可能不在新 armature 中）
+    # 不保存配置，等 bone 改变时再保存
     _syncing_set_ui = True
     try:
         self.bone = ""
+        print(f"[DEBUG] _on_ik_fk_armature_changed: cleared bone to empty string")
     finally:
         _syncing_set_ui = False
-    
-    # 保存配置 (armature 改变，bone 为空)
-    utils_set_bone_config.save_set_bone_config(pose_bone, config_type, self.armature, "")
-    
+
     for area in context.screen.areas:
         area.tag_redraw()
 
@@ -275,32 +294,55 @@ def _on_ik_fk_armature_changed(self, context):
 def _on_ik_fk_bone_changed(self, context):
     """当 IK/FK/IK CTRL 的 bone 改变时，保存配置"""
     global _syncing_set_ui
-    
+
+    print(f"[DEBUG] _on_ik_fk_bone_changed called, _syncing_set_ui={_syncing_set_ui}")
+
     if _syncing_set_ui:
+        print("[DEBUG] _on_ik_fk_bone_changed: early return due to _syncing_set_ui")
         return
-    
+
     obj = context.active_object
     if not obj or obj.type != 'ARMATURE' or obj.mode != 'POSE':
+        print("[DEBUG] _on_ik_fk_bone_changed: early return - not in POSE mode")
         return
-    
-    # 获取所属的 PoseBone
-    pose_bone = self.id_data
-    if not hasattr(pose_bone, 'name'):
+
+    # 获取当前选中的 PoseBone
+    pose_bone = context.active_pose_bone
+    if not pose_bone:
+        print("[DEBUG] _on_ik_fk_bone_changed: no active_pose_bone")
         return
-    
-    # 只处理 SET- 骨骼
+
     if not pose_bone.name.startswith("SET-"):
+        print(f"[DEBUG] _on_ik_fk_bone_changed: {pose_bone.name} not SET- bone")
         return
-    
-    # 获取配置类型 (ik/fk/ik_ctrl)
-    path = self.path_from_id()
-    config_type = path.split('.')[0] if '.' in path else None
-    if config_type not in ['ik', 'fk', 'ik_ctrl']:
+
+    # 获取 config_type：检查 self 是 ik/fk/ik_ctrl 中的哪一个
+    set_ui = pose_bone.amazing_set_bone_ui
+    config_type = None
+    if self is set_ui.ik:
+        config_type = 'ik'
+    elif self is set_ui.fk:
+        config_type = 'fk'
+    elif self is set_ui.ik_ctrl:
+        config_type = 'ik_ctrl'
+
+    print(f"[DEBUG] _on_ik_fk_bone_changed: config_type={config_type}")
+    if config_type is None:
         return
-    
+
+    armature_obj = getattr(self, 'armature', None)
+    bone_name = getattr(self, 'bone', '') or ""
+    print(f"[DEBUG] _on_ik_fk_bone_changed: armature={armature_obj}, bone={bone_name}")
+
+    # 如果 armature 为 None 或 bone 为空，不保存
+    if armature_obj is None or not bone_name:
+        print("[DEBUG] _on_ik_fk_bone_changed: NOT saving - armature is None or bone is empty")
+        return
+
     # 保存配置
-    utils_set_bone_config.save_set_bone_config(pose_bone, config_type, self.armature, self.bone)
-    
+    print(f"[DEBUG] _on_ik_fk_bone_changed: SAVING config")
+    utils_set_bone_config.save_set_bone_config(pose_bone, config_type, armature_obj, bone_name)
+
     for area in context.screen.areas:
         area.tag_redraw()
 
@@ -968,14 +1010,31 @@ class AMAZING_RIGGING_OT_snap_fk_to_ik(Operator):
         if not ik_armature or not ik_bone_name or not fk_armature or not fk_bone_name:
             ik_config = utils_set_bone_config.load_set_bone_config(set_bone, 'ik')
             fk_config = utils_set_bone_config.load_set_bone_config(set_bone, 'fk')
-            
+
             if ik_config["valid"]:
                 ik_armature = ik_config["armature_obj"]
                 ik_bone_name = ik_config["bone_name"]
             if fk_config["valid"]:
                 fk_armature = fk_config["armature_obj"]
                 fk_bone_name = fk_config["bone_name"]
-        
+
+        # 验证 UI 配置的骨骼是否仍然存在，如已删除则清空 UI 配置
+        if ik_armature and ik_bone_name:
+            if ik_armature.pose.bones.get(ik_bone_name) is None:
+                print(f"[INFO] IK 配置骨骼 '{ik_bone_name}' 已删除，清空 UI 配置")
+                ik_armature = None
+                ik_bone_name = ""
+                set_ui.ik.armature = None
+                set_ui.ik.bone = ""
+
+        if fk_armature and fk_bone_name:
+            if fk_armature.pose.bones.get(fk_bone_name) is None:
+                print(f"[INFO] FK 配置骨骼 '{fk_bone_name}' 已删除，清空 UI 配置")
+                fk_armature = None
+                fk_bone_name = ""
+                set_ui.fk.armature = None
+                set_ui.fk.bone = ""
+
         if not ik_armature or not ik_bone_name or not fk_armature or not fk_bone_name:
             self.report({'WARNING'}, "IK 和 FK 配置都必须设置")
             return {'CANCELLED'}
@@ -1071,7 +1130,7 @@ class AMAZING_RIGGING_OT_snap_ik_to_fk(Operator):
         
         # 获取 SET- 骨骼的 UI 状态
         set_ui = set_bone.amazing_set_bone_ui
-        
+
         # 优先使用 UI 中的配置
         ik_armature = set_ui.ik.armature
         ik_bone_name = set_ui.ik.bone
@@ -1079,25 +1138,53 @@ class AMAZING_RIGGING_OT_snap_ik_to_fk(Operator):
         fk_bone_name = set_ui.fk.bone
         ik_ctrl_armature = set_ui.ik_ctrl.armature
         ik_ctrl_bone_name = set_ui.ik_ctrl.bone
-        
+
         # 如果 UI 中没有配置,尝试从持久化配置加载
         if not ik_armature or not ik_bone_name or not fk_armature or not fk_bone_name:
             ik_config = utils_set_bone_config.load_set_bone_config(set_bone, 'ik')
             fk_config = utils_set_bone_config.load_set_bone_config(set_bone, 'fk')
-            
+
             if ik_config["valid"]:
                 ik_armature = ik_config["armature_obj"]
                 ik_bone_name = ik_config["bone_name"]
             if fk_config["valid"]:
                 fk_armature = fk_config["armature_obj"]
                 fk_bone_name = fk_config["bone_name"]
-        
+
         # 加载 IK CTRL 配置
         if not ik_ctrl_armature or not ik_ctrl_bone_name:
             ik_ctrl_config = utils_set_bone_config.load_set_bone_config(set_bone, 'ik_ctrl')
             if ik_ctrl_config["valid"]:
                 ik_ctrl_armature = ik_ctrl_config["armature_obj"]
                 ik_ctrl_bone_name = ik_ctrl_config["bone_name"]
+
+        # 验证 UI 配置的骨骼是否仍然存在，如已删除则清空 UI 配置
+        # IK 配置验证
+        if ik_armature and ik_bone_name:
+            if ik_armature.pose.bones.get(ik_bone_name) is None:
+                print(f"[INFO] IK 配置骨骼 '{ik_bone_name}' 已删除，清空 UI 配置")
+                ik_armature = None
+                ik_bone_name = ""
+                set_ui.ik.armature = None
+                set_ui.ik.bone = ""
+
+        # FK 配置验证
+        if fk_armature and fk_bone_name:
+            if fk_armature.pose.bones.get(fk_bone_name) is None:
+                print(f"[INFO] FK 配置骨骼 '{fk_bone_name}' 已删除，清空 UI 配置")
+                fk_armature = None
+                fk_bone_name = ""
+                set_ui.fk.armature = None
+                set_ui.fk.bone = ""
+
+        # IK CTRL 配置验证
+        if ik_ctrl_armature and ik_ctrl_bone_name:
+            if ik_ctrl_armature.pose.bones.get(ik_ctrl_bone_name) is None:
+                print(f"[INFO] IK CTRL 配置骨骼 '{ik_ctrl_bone_name}' 已删除，清空 UI 配置")
+                ik_ctrl_armature = None
+                ik_ctrl_bone_name = ""
+                set_ui.ik_ctrl.armature = None
+                set_ui.ik_ctrl.bone = ""
         
         # 验证IK和FK配置
         if not ik_armature or not ik_bone_name:
