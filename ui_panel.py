@@ -586,6 +586,14 @@ def _draw_set_bone_ik_fk_ui(layout, context, pose_bone):
     
     # 内容 (展开时显示)
     if not is_hidden:
+        # 检测是否为镜像创建的 SET-骨骼（通过命名约定：.R 后缀表示镜像自 .L）
+        is_mirrored_bone = False
+        flipped_name = bpy.utils.flip_name(pose_bone.name)
+        if flipped_name != pose_bone.name:
+            # 名称被翻转（说明有 .L/.R 标识），检查源骨骼是否存在
+            if flipped_name in pose_bone.id_data.data.bones:
+                is_mirrored_bone = True
+
         # 绘制单个配置项的辅助函数
         def _draw_config_section(config_type, label_text, icon, ui_config):
             """绘制单个配置项 (IK/FK/IK CTRL)
@@ -639,12 +647,12 @@ def _draw_set_bone_ik_fk_ui(layout, context, pose_bone):
             row = box.row(align=True)
             row.prop(ui_config, "armature", text="")
 
-            # 状态图标
-            if status_icon != 'NONE':
+            # 状态图标 (镜像创建的 SET-骨骼不显示)
+            if status_icon != 'NONE' and not is_mirrored_bone:
                 row.label(text="", icon=status_icon)
 
-            # 清除按钮 (仅当配置存在时显示)
-            if config_result["config_data"] is not None:
+            # 清除按钮 (仅当配置存在时显示，且非镜像创建的 SET-骨骼)
+            if config_result["config_data"] is not None and not is_mirrored_bone:
                 op = row.operator("amazing_rigging.clear_ik_fk_config", text="", icon='X')
                 op.config_type = config_type
 
