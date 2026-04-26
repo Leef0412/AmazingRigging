@@ -41,6 +41,13 @@ class AMAZING_RIGGING_ArmatureProperties(PropertyGroup):
 # 当前规则版本号（必须与 __init__.py 中 CURRENT_RULES_VERSION 保持一致）
 _CURRENT_RULES_VERSION = 3
 
+def _get_mirror_base(col_name):
+    """Strip .L/.R suffix from collection name. Returns (base_name, suffix_letter or None)."""
+    for suffix in (".R", ".L"):
+        if col_name.endswith(suffix):
+            return col_name[:-2], suffix[1:]  # 'Arm.L' -> ('Arm', 'L')
+    return col_name, None
+
 def _check_and_migrate_rules(arm_data):
     """检查 armature 的 split rules 版本，如果低于当前版本则迁移到新默认规则"""
     rules = arm_data.amazing_split_rules
@@ -283,21 +290,57 @@ class AMAZING_RIGGING_OT_init_data(Operator):
                         matched_collection_names.add(b_col.name)
 
         # Add ALL matched collections to amazing_grid_data with rule_index
-        # Each rule gets its own section, each collection gets its own row by default
+        # Mirror pairs (.L / .R) are placed on the same row: .R at col=0 (left), .L at col=1 (right)
+        # Non-mirror collections get their own row with col=0
         for rule_idx in sorted(rule_collections.keys()):
             collections = rule_collections[rule_idx]
-            
+
             if not collections:
                 continue
 
-            # Add each collection as a separate row within this rule's section
-            for col_idx, col_name in enumerate(collections):
-                item = arm_data.amazing_grid_data.add()
-                item.name = col_name
-                item.row = col_idx  # Each collection gets its own row by default
-                item.col = 0
-                item.note = col_name
-                item.rule_index = rule_idx  # Mark which rule this item belongs to
+            # Group collections by base name (strip .L / .R suffix)
+            base_groups = {}  # base_name -> {"R": col_name or None, "L": col_name or None}
+            for col_name in collections:
+                base_name, suffix = _get_mirror_base(col_name)
+                if base_name not in base_groups:
+                    base_groups[base_name] = {"R": None, "L": None}
+                if suffix in ("R", "L"):
+                    base_groups[base_name][suffix] = col_name
+
+            # Sort base names for consistent row assignment
+            sorted_bases = sorted(base_groups.keys())
+            row_idx = 0
+            for base_name in sorted_bases:
+                group = base_groups[base_name]
+                r_col = group["R"]
+                l_col = group["L"]
+
+                if r_col or l_col:
+                    # Has .L/.R suffix (mirror pair or single-sided)
+                    if r_col:
+                        item = arm_data.amazing_grid_data.add()
+                        item.name = r_col
+                        item.row = row_idx
+                        item.col = 0  # .R goes to left column
+                        item.note = r_col
+                        item.rule_index = rule_idx
+                    if l_col:
+                        item = arm_data.amazing_grid_data.add()
+                        item.name = l_col
+                        item.row = row_idx
+                        item.col = 1  # .L goes to right column
+                        item.note = l_col
+                        item.rule_index = rule_idx
+                    row_idx += 1
+                else:
+                    # Non-mirror collection:独占一行
+                    item = arm_data.amazing_grid_data.add()
+                    item.name = base_name  # base_name here is the original collection name (no suffix)
+                    item.row = row_idx
+                    item.col = 0
+                    item.note = base_name
+                    item.rule_index = rule_idx
+                    row_idx += 1
 
         for area in context.screen.areas:
             area.tag_redraw()
