@@ -889,22 +889,62 @@ def _rebuild_grid_after_rule_migration(armature):
                     rule_collections[rule_idx].append(b_col.name)
                     matched_names.add(b_col.name)
     
-    # 将所有匹配的集合添加到 grid_data
+    # 将所有匹配的集合添加到 grid_data（带镜像配对逻辑）
+    # 镜像pair: .R在col=0（左侧），.L在col=1（右侧），非镜像独占一行
+    def _get_mirror_base(col_name):
+        for suffix in (".R", ".L"):
+            if col_name.endswith(suffix):
+                return col_name[:-2], suffix[1:]
+        return col_name, None
+
     for rule_idx in sorted(rule_collections.keys()):
         collections = rule_collections[rule_idx]
-        
+
         if not collections:
             continue
-        
-        # 添加该规则下的所有集合
-        for col_idx, col_name in enumerate(collections):
-            item = grid_data.add()
-            item.name = col_name
-            item.row = col_idx
-            item.col = 0
-            item.note = col_name
-            item.rule_index = rule_idx
-    
+
+        # Group by base name
+        base_groups = {}
+        for col_name in collections:
+            base_name, suffix = _get_mirror_base(col_name)
+            if base_name not in base_groups:
+                base_groups[base_name] = {"R": None, "L": None}
+            if suffix in ("R", "L"):
+                base_groups[base_name][suffix] = col_name
+
+        sorted_bases = sorted(base_groups.keys())
+        row_idx = 0
+        for base_name in sorted_bases:
+            group = base_groups[base_name]
+            r_col = group["R"]
+            l_col = group["L"]
+
+            if r_col or l_col:
+                if r_col:
+                    item = grid_data.add()
+                    item.name = r_col
+                    item.row = row_idx
+                    item.col = 0
+                    item.note = r_col
+                    item.rule_index = rule_idx
+                if l_col:
+                    item = grid_data.add()
+                    item.name = l_col
+                    item.row = row_idx
+                    item.col = 1
+                    item.note = l_col
+                    item.rule_index = rule_idx
+                row_idx += 1
+            else:
+                # Non-mirror collection: 独占一行
+                item = grid_data.add()
+                item.name = base_name
+                item.row = row_idx
+                item.col = 0
+                item.note = base_name
+                item.rule_index = rule_idx
+                row_idx += 1
+
     print(f"[DEBUG] 规则迁移后重建 grid_data: {len(grid_data)} 项")
 
 
